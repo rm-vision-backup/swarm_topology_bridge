@@ -1,0 +1,34 @@
+uavs:
+  - {name: UAV6, ip: 192.168.5.61}
+  - {name: UAV7, ip: 192.168.5.71}
+  - {name: UAV8, ip: 192.168.5.81}
+  - {name: UAV9, ip: 192.168.5.91}
+  - {name: UAV10, ip: 192.168.5.101}
+
+topics:
+  - {name: mavros/state,                   type: mavros_msgs/State}
+  - {name: mavros/time_reference,          type: sensor_msgs/TimeReference}
+  - {name: mavros/global_position/global,  type: sensor_msgs/NavSatFix}
+  - {name: mavros/local_position/odom,     type: nav_msgs/Odometry}
+  - {name: mavros/rc/in,                   type: mavros_msgs/RCIn}
+  - {name: leader_fix_origin,              type: sensor_msgs/NavSatFix}
+
+max_freq: 50
+base_port: 4200
+
+# 通用 Service 代理测试 (std_srvs 内置类型, 不依赖业务包)
+services:
+  - {name: /test_srv/UAV6,  type: std_srvs/SetBool, target: UAV6}
+  - {name: /test_srv/UAV7,  type: std_srvs/SetBool, target: UAV7}
+  - {name: /test_srv/UAV8,  type: std_srvs/SetBool, target: UAV8}
+  - {name: /test_srv/UAV9,  type: std_srvs/SetBool, target: UAV9}
+  - {name: /test_srv/UAV10, type: std_srvs/SetBool, target: UAV10}
+
+service_base_port: 14000
+
+topology:
+  UAV6: [UAV7, UAV8, UAV9, UAV10]
+  UAV7: [UAV6, UAV8, UAV9, UAV10]
+  UAV8: [UAV6, UAV7, UAV9, UAV10]
+  UAV9: [UAV6, UAV7, UAV8, UAV10]
+  UAV10: [UAV6, UAV7, UAV9, UAV8]

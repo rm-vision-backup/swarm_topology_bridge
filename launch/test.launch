@@ -1,9 +1,12 @@
 <launch>
-  <!-- 实机应用示例: 每台机载电脑启动本 launch, 用 hostname 或 uav_name 推断本机身份 -->
+  <!-- 通用 Service 代理 / Topic 桥测试入口（implementation_plan_26091101 §8）：
+       加载独立测试拓扑 topology_test.yaml（UAV6–UAV10 + /test_srv/*），
+       与生产 topology.yaml 解耦，生产替换不影响本测试。
+       每台机载电脑启动本 launch，用 hostname 或 uav_name 推断本机身份。 -->
   <arg name="uav_name" default="" />
 
   <node pkg="swarm_topology_bridge" type="bridge_node.py" name="swarm_bridge" output="screen">
-    <rosparam file="$(find swarm_topology_bridge)/config/topology.yaml" command="load" />
+    <rosparam file="$(find swarm_topology_bridge)/config/topology_test.yaml" command="load" />
     <param name="uav_name" value="$(arg uav_name)" />
   </node>
 

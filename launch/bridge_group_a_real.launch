@@ -1,0 +1,13 @@
+<launch>
+  <!-- 实机单机 bridge 入口（implementation_plan_26091101 §4.3/§5）：
+       每台机器只启动本机 bridge，加载生产 topology.yaml（物理 IP、port_offset=0）。
+       身份由 hostname 判定（机载 hostname=UAVn；地面站 hostname=GCS_A）；无法唯一
+       匹配时启动失败。本入口与仿真入口 topology_group_a_sim.launch 分离。 -->
+  <arg name="config" default="$(find swarm_topology_bridge)/config/topology.yaml" />
+  <arg name="uav_name" default="" />
+
+  <node pkg="swarm_topology_bridge" type="bridge_node.py" name="swarm_bridge" output="screen">
+    <rosparam file="$(arg config)" command="load" />
+    <param name="uav_name" value="$(arg uav_name)" />
+  </node>
+</launch>

@@ -22,12 +22,14 @@
     ├── LICENSE
     ├── README.md                 # 中文主 README（唯一维护文档）
     ├── config
-    │   ├── topology.yaml             # 实机部署默认配置
-    │   ├── topology_group_a_sim.yaml # Group A 多 Master 仿真拓扑（GCS_A + UAV1..UAV15，唯一 owner）
+    │   ├── topology.yaml             # Group A 实机生产配置（GCS_A + UAV1..UAV16，port_offset=0）
+    │   ├── topology_test.yaml        # 测试拓扑（UAV6..UAV10 + /test_srv），test.launch 专用
+    │   ├── topology_group_a_sim.yaml # Group A 多 Master 仿真拓扑（GCS_A + UAV1..UAV16，唯一 owner）
     │   ├── topology_sim_swarm.yaml   # 多 Master 联合仿真配置
     │   └── topology_sim_single.yaml  # 单机回环测试配置
     ├── launch
-    │   ├── test.launch               # 实机应用示例启动文件
+    │   ├── test.launch               # 测试拓扑入口（topology_test.yaml + Service 代理测试）
+    │   ├── bridge_group_a_real.launch # 实机单机 bridge 入口（生产 topology.yaml）
     │   ├── test_sim_swarm.launch     # 仿真多机集成测试启动文件
     │   ├── test_sim_single.launch    # 仿真单机回环测试启动文件
     │   └── topology_group_a_sim.launch # Group A 仿真拓扑 launch（bridge 入口）
@@ -67,6 +69,20 @@ mkdir -p "$ROS_LOG_DIR"
 ```
 
 手动启动前请先在终端执行以上命令，确保当前工作空间所有 ROS 运行日志均写入 `.ros_home/log`。
+
+## 实机部署（implementation_plan_26091101）
+
+- **一份生产配置**：`config/topology.yaml` 描述实机 GCS_A（`192.168.5.241`）与 UAV1–UAV16
+  物理 IP；实机各机独立 IP，所有节点 `port_offset: 0`。端口冻结 `base_port: 4200`、
+  `service_base_port: 14000`（已实机验证无冲突，防火墙按对应 TCP 范围放行）。
+- **每机一个 bridge**：机载入口 `launch/bridge_group_a_real.launch`，按 hostname 判定本机身份
+  （机载电脑 hostname 固定为 `UAVn`，地面站 hostname=`GCS_A`）。启动脚本只启动本机程序，
+  不循环启动其他 UAV。
+- **身份边界**：topology 与 bridge 只用执行层 `UAVn`；任务层 `Axx` 仅由 `tcp_to_ros` 处理。
+- **仿真仍用 `topology_group_a_sim.yaml`**（GCS_A + UAV1–UAV16，`127.0.0.1` + `port_offset`；
+  UAV16 独立 `port_offset: 1600`，仿真启动/任务测试不启动 UAV16，用于验证缺席机不阻塞原点 ready）。
+- **测试隔离**：`launch/test.launch` 加载 `config/topology_test.yaml`（含 `/test_srv/*`），
+  生产 `topology.yaml` 替换不影响该测试。
 
 ## 1. 配置说明
 
