@@ -63,8 +63,8 @@ source devel/setup.bash
 为避免 ROS 运行日志散落在 `~/.ros/log`，本工作空间统一将运行日志重定向到 `.ros_home/`：
 
 ```bash
-export ROS_HOME=/home/ub20tg/catkin_swarm6-2/.ros_home
-export ROS_LOG_DIR=/home/ub20tg/catkin_swarm6-2/.ros_home/log
+export ROS_HOME=/home/yjq/catkin_swarm6-2/.ros_home
+export ROS_LOG_DIR=/home/yjq/catkin_swarm6-2/.ros_home/log
 mkdir -p "$ROS_LOG_DIR"
 ```
 
