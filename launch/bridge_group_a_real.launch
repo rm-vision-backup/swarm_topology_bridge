@@ -9,7 +9,7 @@
        launch 起 bridge → 自动获得"GCS 视角"的同链健康数据，可与各机交叉定层。 -->
   <arg name="config" default="$(find swarm_topology_bridge)/config/topology.yaml" />
   <arg name="uav_name" default="" />
-  <arg name="health_log_dir" default="$(optenv HOME /tmp)/catkin_swarm6-2/.runtime_logs/health" />
+  <arg name="health_log_dir" default="$(optenv HOME /tmp)/catkin_swarm6-2/.ros_home/log/health" />
   <arg name="health_sample_hz" default="0.5" />
   <arg name="health_matrix_period_s" default="60.0" />
   <arg name="stall_warn_s" default="1.5" />

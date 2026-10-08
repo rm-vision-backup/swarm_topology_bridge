@@ -241,7 +241,7 @@ class BridgeNode:
 
     def _load_health_config_unsafe(self):
         """实际的参数读取（可能因非法参数抛异常，由 `_load_health_config` 兜底）。"""
-        default_dir = os.path.expanduser("~/catkin_swarm6-2/.runtime_logs/health")
+        default_dir = os.path.expanduser("~/catkin_swarm6-2/.ros_home/log/health")
         health_dir = str(rospy.get_param("~health_log_dir", default_dir) or "").strip()
         if health_dir.lower() in ("none", "off", "disabled"):
             health_dir = ""

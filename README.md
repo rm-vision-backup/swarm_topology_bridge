@@ -253,8 +253,8 @@ ZMQ 链路也没有任何心跳，IP 层半开即"永久静默、不重连"。�
 
 ### 5.1 健康日志（默认开）
 
-写到 `<health_log_dir>/<uav_name>_bridge_health.jsonl`（默认 `<ws>/.runtime_logs/health/`，
-**隐藏目录、与 `.ros_home` 同风格**；planner 诊断仍在 `runtime_logs/ego_planner/`，未动）。
+写到 `<health_log_dir>/<uav_name>_bridge_health.jsonl`（默认 `<ws>/.ros_home/log/health/`，
+与 ROS 自身日志同根；planner 诊断同根在 `.ros_home/log/ego_planner/`）。
 **不经 rosout**——任务窗口 rosout 本就无输出；文件随采集流程回取。
 
 **体积与频率（2026-10-08 四机 SITL 彩排实测）**：默认 `sample 0.5 Hz` + `matrix 60 s` + **停顿时补一份明细**，
@@ -284,7 +284,7 @@ ZMQ 链路也没有任何心跳，IP 层半开即"永久静默、不重连"。�
 
 | 参数 | 默认 | 说明 |
 |---|---|---|
-| `~health_log_dir` | `$HOME/catkin_swarm6-2/.runtime_logs/health` | 空串/none/off = 关闭观测 |
+| `~health_log_dir` | `$HOME/catkin_swarm6-2/.ros_home/log/health` | 空串/none/off = 关闭观测 |
 | `~health_sample_hz` / `~health_matrix_period_s` | `0.5` / `60.0` | 矩阵是汇总行的 10 倍体积；停顿发生时会额外补一份 `trigger="stall"` 的明细 |
 | `~health_key_topics` | odom/pose/state/intent/task_state | 逐话题汇总与矩阵覆盖范围 |
 | `~stall_topics` | odom/pose | 只有高频周期性话题才判停顿（`trajectory_intent`/`uav_task_state` 事件驱动，天生静默） |
