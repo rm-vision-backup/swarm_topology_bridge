@@ -2,12 +2,36 @@
   <!-- 实机单机 bridge 入口（implementation_plan_26091101 §4.3/§5）：
        每台机器只启动本机 bridge，加载生产 topology.yaml（物理 IP、port_offset=0）。
        身份由 hostname 判定（机载 hostname=UAVn；地面站 hostname=GCS_A）；无法唯一
-       匹配时启动失败。本入口与仿真入口 topology_group_a_sim.launch 分离。 -->
+       匹配时启动失败。本入口与仿真入口 topology_group_a_sim.launch 分离。
+
+       数据面观测（2026-10-08 增）：健康 JSONL 落 health_log_dir/<uav>_bridge_health.jsonl，
+       不经 rosout（任务窗口 rosout 本就无输出），随 Uav_log 采集流程回取。GCS 侧用同一份
+       launch 起 bridge → 自动获得"GCS 视角"的同链健康数据，可与各机交叉定层。 -->
   <arg name="config" default="$(find swarm_topology_bridge)/config/topology.yaml" />
   <arg name="uav_name" default="" />
+  <arg name="health_log_dir" default="$(optenv HOME /tmp)/catkin_swarm6-2/runtime_logs/health" />
+  <arg name="health_sample_hz" default="1.0" />
+  <arg name="health_matrix_period_s" default="10.0" />
+  <arg name="stall_warn_s" default="1.5" />
+  <!-- 链路加固：心跳 10 s 超时（现场实测 1~3 s 空档，3 s 会高频拆链重建）；
+       重连退避上限 1 s（跟随者 1.0 s 即判 LEADER_LOST，恢复不能更慢）。 -->
+  <arg name="zmq_heartbeat_ivl_ms" default="1000" />
+  <arg name="zmq_heartbeat_timeout_ms" default="10000" />
+  <arg name="zmq_reconnect_ivl_ms" default="200" />
+  <arg name="zmq_reconnect_ivl_max_ms" default="1000" />
+  <arg name="zmq_dealer_sndtimeo_ms" default="500" />
 
   <node pkg="swarm_topology_bridge" type="bridge_node.py" name="swarm_bridge" output="screen">
     <rosparam file="$(arg config)" command="load" />
     <param name="uav_name" value="$(arg uav_name)" />
+    <param name="health_log_dir" value="$(arg health_log_dir)" />
+    <param name="health_sample_hz" value="$(arg health_sample_hz)" />
+    <param name="health_matrix_period_s" value="$(arg health_matrix_period_s)" />
+    <param name="stall_warn_s" value="$(arg stall_warn_s)" />
+    <param name="zmq_heartbeat_ivl_ms" value="$(arg zmq_heartbeat_ivl_ms)" />
+    <param name="zmq_heartbeat_timeout_ms" value="$(arg zmq_heartbeat_timeout_ms)" />
+    <param name="zmq_reconnect_ivl_ms" value="$(arg zmq_reconnect_ivl_ms)" />
+    <param name="zmq_reconnect_ivl_max_ms" value="$(arg zmq_reconnect_ivl_max_ms)" />
+    <param name="zmq_dealer_sndtimeo_ms" value="$(arg zmq_dealer_sndtimeo_ms)" />
   </node>
 </launch>

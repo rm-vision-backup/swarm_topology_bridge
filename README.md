@@ -244,6 +244,64 @@ roslaunch swarm_topology_bridge test.launch uav_name:=UAV6
 - 上层业务节点在各自 ROS Master 上直接调用 `/test_srv/UAVn`（或业务 Service 名），bridge 自动完成跨 Master 转发；
 - 业务 Topic 与 Service 的判读方式与第 2、3 节相同（`[TopicBridge]`/`[ServiceProxy]` 日志、`rostopic`/`rosservice` 辅助确认）。
 
+## 5. 数据面观测与链路加固（2026-10-08 增）
+
+两轮实飞（2026-09-22 三机 / 09-23 四机）coverage 失败时，bridge **对数据面零可观测**：
+没有 per-topic 计数、没有最后到达时间、没有断链日志，`recv_loop` 连 try/except 都没有；
+ZMQ 链路也没有任何心跳，IP 层半开即"永久静默、不重连"。逐层定位只能靠排除法。
+本节参数由 `scripts/bridge_health.py` 实现（纯逻辑，可无 ROS 单测：`test/test_bridge_health.py`）。
+
+### 5.1 健康日志（默认开）
+
+按秒写 JSONL 到 `<health_log_dir>/<uav_name>_bridge_health.jsonl`（**不经 rosout**——任务窗口
+rosout 本就无输出；文件随采集流程回取）：
+
+| 行类型 | 内容 |
+|---|---|
+| `health_start` | 启动摘要：文件路径、采样率、KEY/停顿/监控话题、实际生效的链路选项 |
+| `sample`（每秒） | 逐 KEY 话题：收发计数、限频丢弃数、`age_ms`、`max gap`、`>0.2/0.5/1.0/3.0 s` 间隔计数；接收侧再给"最旧源 `age_max_src`"与"陈旧源列表 `stale_srcs`"；另带 `load1`、进程 CPU 秒、`write_errors`、`stuck_sockets`（**套接字里有数据但没被取走** = 收包线程被饿死/卡住） |
+| `matrix`（默认 10 s） | 逐 (源, 话题) 明细，定位到具体哪条链 |
+| `stall_start` / `stall_end` | 停顿事件（含静默时长/持续时长），只对周期性话题（默认 odom/pose）判 |
+| `link` | **连接级**事件（connected / disconnected / connect_retried…）——区分"数据没到"与"链路断了"的唯一直接信号 |
+| `error` | 收包/反序列化/发布异常与 traceback（旧实现下这类异常会**静默杀死整个接收线程**） |
+
+关键参数（都有默认值，仿真/测试入口不传也能用）：
+
+| 参数 | 默认 | 说明 |
+|---|---|---|
+| `~health_log_dir` | `$HOME/catkin_swarm6-2/runtime_logs/health` | 空串/none/off = 关闭观测 |
+| `~health_sample_hz` / `~health_matrix_period_s` | `1.0` / `10.0` | 矩阵是汇总行的 10 倍体积，默认降频 |
+| `~health_key_topics` | odom/pose/state/intent/task_state | 逐话题汇总与矩阵覆盖范围 |
+| `~stall_topics` | odom/pose | 只有高频周期性话题才判停顿（`trajectory_intent`/`uav_task_state` 事件驱动，天生静默） |
+| `~stall_warn_s` | `1.5` | 停顿告警阈值（跟随环自身判据是 1.0 s） |
+| `~monitor_topics` | odom | 开 ZMQ socket monitor 的话题（每源一个 monitor socket） |
+
+### 5.2 链路加固（默认开）
+
+`apply_link_options()` 在 `bind()/connect()` **之前**给所有 socket 装：
+
+- `ZMQ_HEARTBEAT_IVL=1000ms` + `ZMQ_HEARTBEAT_TIMEOUT=10000ms`：ZMTP 心跳。超时取 10 s 是因为
+  现场实测电台拥塞时会出现 1~3 s 空档（见 `config/topology.yaml` 注释），3 s 超时会把"半开兜底"
+  变成高频拆链重建。**心跳只覆盖链路层**：对端进程活着但收包线程卡住时心跳照常，那种情况由
+  `stuck_sockets` / `stall_*` 暴露。**TTL 不设**（静默话题不该被对端按"无数据"判超时）。
+- `ZMQ_TCP_KEEPALIVE*`：OS 层半开检测（第二道）。
+- `ZMQ_RECONNECT_IVL=200ms` / `MAX=1000ms`：断链退避（默认 100 ms 固定重试在 ~160 条链同时掉时
+  会以 10 Hz/链 的 SYN 抖电台；上限取 1 s——跟随者 1.0 s 就判 `LEADER_LOST`，恢复不能更慢）。
+- DEALER 另加 `ZMQ_SNDTIMEO=500ms`：DEALER 满 SNDHWM 时 `send_multipart` **会阻塞**（PUB 不会），
+  否则服务路径会无声挂起。
+
+### 5.3 分析入口
+
+一次任务后，把各机与 GCS 的 `*_bridge_health.jsonl` 对齐时间轴，按
+`(src=领机, topic=mavros/local_position/odom)` 看 `age_ms` / `gt1000` / `link` 事件即可定层：
+
+| 现象 | 结论 |
+|---|---|
+| 发送侧 `local` 行 `rx` 停 | mavros → bridge 这一段（上游节点/本地订阅） |
+| 发送侧 `rx` 走、`tx` 停 | bridge 发送路径（含限频丢弃，`drop` 字段可区分） |
+| 接收侧 `rx` 停、发送侧 `tx` 走 | ZMQ/电台链路（配合 `link` 事件判断是否真的断开重连） |
+| 接收侧 `rx` 走、执行器事件缺失 | 执行器内部（见 swarm_uav_executor 的 `*_executor_events.jsonl`） |
+
 ## 项目渊源
 - 受 C++ 项目 [swarm_ros_bridge](https://github.com/shupx/swarm_ros_bridge) 启发。
 - 本仓库为 Python 重构版本，针对配置灵活性、Service 代理和仿真适配进行了优化。
