@@ -253,24 +253,39 @@ ZMQ 链路也没有任何心跳，IP 层半开即"永久静默、不重连"。�
 
 ### 5.1 健康日志（默认开）
 
-按秒写 JSONL 到 `<health_log_dir>/<uav_name>_bridge_health.jsonl`（**不经 rosout**——任务窗口
-rosout 本就无输出；文件随采集流程回取）：
+写到 `<health_log_dir>/<uav_name>_bridge_health.jsonl`（默认 `<ws>/.runtime_logs/health/`，
+**隐藏目录、与 `.ros_home` 同风格**；planner 诊断仍在 `runtime_logs/ego_planner/`，未动）。
+**不经 rosout**——任务窗口 rosout 本就无输出；文件随采集流程回取。
+
+**体积与频率（2026-10-08 四机 SITL 彩排实测）**：默认 `sample 0.5 Hz` + `matrix 60 s` + **停顿时补一份明细**，
+另加连接事件去噪（未连上的对端只计数不刷日志，见下）。同一段约 200 s 的运行：
+
+| | 降频去噪前 | 现在 |
+|---|---|---|
+| bridge 健康文件 | 1.5–1.8 MB（≈15 MB/h/机） | **231–235 KB（≈4 MB/h/机）** |
+| 事件行数（非 sample/matrix） | ≈6840 条/机（≈16 条/s） | **17 条/机** |
+| 4 机 + GCS 整轮合计 | ≈9 MB | **1.09 MB** |
+
+被抑制的重连在汇总行里以 `links_unconnected`（未连上端点数）与 `link_retries_suppressed`
+（累计抑制条数，实测一台 200 s 内 6790 次）呈现——**这本身也说明"生产 topology 列了 17 个节点、
+实际只飞几架"会持续产生连接尝试，建议把接收矩阵裁到实际在飞机队**。
+整机采集体积仍受采集端 32 MB 上限保护（超限只留尾部＝最近一次任务）。
 
 | 行类型 | 内容 |
 |---|---|
 | `health_start` | 启动摘要：文件路径、采样率、KEY/停顿/监控话题、实际生效的链路选项 |
-| `sample`（每秒） | 逐 KEY 话题：收发计数、限频丢弃数、`age_ms`、`max gap`、`>0.2/0.5/1.0/3.0 s` 间隔计数；接收侧再给"最旧源 `age_max_src`"与"陈旧源列表 `stale_srcs`"；另带 `load1`、进程 CPU 秒、`write_errors`、`stuck_sockets`（**套接字里有数据但没被取走** = 收包线程被饿死/卡住） |
+| `sample` | 逐 KEY 话题：收发计数、限频丢弃数、`age_ms`、`max gap`、`>0.2/0.5/1.0/3.0 s` 间隔计数；接收侧再给"最旧源 `age_max_src`"与"陈旧源列表 `stale_srcs`"；另带 `load1`、进程 CPU 秒、`write_errors`、`stuck_sockets`（**套接字里有数据但没被取走** = 收包线程被饿死/卡住） |
 | `matrix`（默认 10 s） | 逐 (源, 话题) 明细，定位到具体哪条链 |
 | `stall_start` / `stall_end` | 停顿事件（含静默时长/持续时长），只对周期性话题（默认 odom/pose）判 |
-| `link` | **连接级**事件（connected / disconnected / connect_retried…）——区分"数据没到"与"链路断了"的唯一直接信号 |
+| `link` | **连接级**事件——区分"数据没到"与"链路断了"的唯一直接信号。**从未连上的端点只计数不刷日志**（汇总行给 `links_seen`/`links_unconnected`/`link_retries_suppressed`），连上之后的断开/重连才逐条记录 |
 | `error` | 收包/反序列化/发布异常与 traceback（旧实现下这类异常会**静默杀死整个接收线程**） |
 
 关键参数（都有默认值，仿真/测试入口不传也能用）：
 
 | 参数 | 默认 | 说明 |
 |---|---|---|
-| `~health_log_dir` | `$HOME/catkin_swarm6-2/runtime_logs/health` | 空串/none/off = 关闭观测 |
-| `~health_sample_hz` / `~health_matrix_period_s` | `1.0` / `10.0` | 矩阵是汇总行的 10 倍体积，默认降频 |
+| `~health_log_dir` | `$HOME/catkin_swarm6-2/.runtime_logs/health` | 空串/none/off = 关闭观测 |
+| `~health_sample_hz` / `~health_matrix_period_s` | `0.5` / `60.0` | 矩阵是汇总行的 10 倍体积；停顿发生时会额外补一份 `trigger="stall"` 的明细 |
 | `~health_key_topics` | odom/pose/state/intent/task_state | 逐话题汇总与矩阵覆盖范围 |
 | `~stall_topics` | odom/pose | 只有高频周期性话题才判停顿（`trajectory_intent`/`uav_task_state` 事件驱动，天生静默） |
 | `~stall_warn_s` | `1.5` | 停顿告警阈值（跟随环自身判据是 1.0 s） |

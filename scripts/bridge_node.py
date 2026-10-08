@@ -234,10 +234,14 @@ class BridgeNode:
         self._monitors = []
         self._recv_errors = {}
         self._link_options_applied = []
+        self._link_lock = threading.Lock()
+        self._link_seen = set()
+        self._link_connected = set()
+        self._link_suppressed = {}
 
     def _load_health_config_unsafe(self):
         """实际的参数读取（可能因非法参数抛异常，由 `_load_health_config` 兜底）。"""
-        default_dir = os.path.expanduser("~/catkin_swarm6-2/runtime_logs/health")
+        default_dir = os.path.expanduser("~/catkin_swarm6-2/.runtime_logs/health")
         health_dir = str(rospy.get_param("~health_log_dir", default_dir) or "").strip()
         if health_dir.lower() in ("none", "off", "disabled"):
             health_dir = ""
@@ -245,9 +249,9 @@ class BridgeNode:
             os.path.join(health_dir, "%s_bridge_health.jsonl" % self.my_name) if health_dir else None,
             warn=lambda message: rospy.logerr_throttle(30.0, "bridge: %s", message))
         self.stats = LinkStats()
-        self.health_sample_hz = max(0.2, float(rospy.get_param("~health_sample_hz", 1.0)))
+        self.health_sample_hz = max(0.2, float(rospy.get_param("~health_sample_hz", 0.5)))
         # 逐 (源,话题) 明细体积是汇总行的 10 倍以上，默认每 10 s 一行（汇总行仍是每秒一行）。
-        self.health_matrix_period_s = max(0.0, float(rospy.get_param("~health_matrix_period_s", 10.0)))
+        self.health_matrix_period_s = max(0.0, float(rospy.get_param("~health_matrix_period_s", 60.0)))
         self.stall_warn_s = float(rospy.get_param("~stall_warn_s", 1.5))
         key_topics = rospy.get_param("~health_key_topics", list(DEFAULT_HEALTH_KEY_TOPICS))
         stall_topics = rospy.get_param("~stall_topics", list(DEFAULT_STALL_TOPICS))
@@ -277,6 +281,10 @@ class BridgeNode:
         self._monitors = []
         self._recv_errors = {}          # socket -> 连续异常次数（自旋保护）
         self._link_options_applied = []
+        self._link_lock = threading.Lock()
+        self._link_seen = set()         # 收到过 monitor 事件的 (src, idx)
+        self._link_connected = set()    # 至少连上过一次的 (src, idx)
+        self._link_suppressed = {}      # 未连接端点的重试计数（不逐条刷日志）
 
     def _apply_link_options(self, sock, **extra):
         """给 socket 装链路选项；失败只降级（返回已生效的选项名），绝不抛出。"""
@@ -287,6 +295,19 @@ class BridgeNode:
             return []
 
     def _on_link_event(self, src, idx, name, endpoint, value):
+        """连接级事件。对"从未连上的端点"只计数不刷日志——生产 topology 列了 17 个节点、
+        实际只飞几架，未起飞的对端会以 ~1 Hz 反复 connect_retried/closed，实测占事件量
+        99%（SITL 彩排 16 事件/s 全来自此）；连上一次之后的断开/重连才是要看的。"""
+        with self._link_lock:
+            self._link_seen.add((src, idx))
+            connected = (src, idx) in self._link_connected
+        if name == "connected":
+            with self._link_lock:
+                self._link_connected.add((src, idx))
+        elif (src, idx) not in self._link_connected:
+            with self._link_lock:
+                self._link_suppressed[(src, idx)] = self._link_suppressed.get((src, idx), 0) + 1
+            return
         self._record_bridge_event({"event": "link", "link_event": name, "src": src,
                                    "topic": self.topic_names.get(idx, str(idx)),
                                    "endpoint": endpoint, "value": value})
@@ -333,22 +354,39 @@ class BridgeNode:
     def _health_loop(self):
         period = 1.0 / self.health_sample_hz
         last_matrix = 0.0
+        # 周期性 matrix 已降频到 60 s；若有人手动调密（≤15 s）则不需要停顿时再补一份
+        matrix_on_small_period = 0.0 < self.health_matrix_period_s <= 15.0
         while not rospy.is_shutdown():
             try:
                 now = time.monotonic()
+                stalled = False
                 for event in self.stats.poll_stalls(
                         now, self.stall_warn_s,
                         key_filter=lambda scope, src, idx: idx in self.stall_indices):
                     event["topic"] = self.topic_names.get(event.pop("topic_idx"), "")
                     self._record_bridge_event(event)
+                    stalled = True
+                if stalled and not matrix_on_small_period:
+                    # 停顿发生时立刻补一份逐 (源,话题) 明细：这正是需要"看清单"的时刻。
+                    self.health.emit({"event": "matrix", "uav": self.my_name,
+                                      "trigger": "stall",
+                                      "remote": self.stats.matrix(self.topic_names,
+                                                                  self.key_indices, now=now)})
+                    last_matrix = now
                 if self.health.path is not None:
                     sample = self.stats.summary(self.topic_names, self.key_indices, now=now,
                                                 stale_age_s=self.stall_warn_s)
+                    with self._link_lock:
+                        seen = len(self._link_seen)
+                        unconnected = len(self._link_seen - self._link_connected)
+                        retries = sum(self._link_suppressed.values())
                     sample.update({"event": "sample", "uav": self.my_name,
                                    "load1": read_loadavg(),
                                    "cpu_s": read_self_cpu_seconds(),
                                    "write_errors": self.health.errors,
-                                   "stuck_sockets": self._stuck_sockets()})
+                                   "stuck_sockets": self._stuck_sockets(),
+                                   "links_seen": seen, "links_unconnected": unconnected,
+                                   "link_retries_suppressed": retries})
                     self.health.emit(sample)
                     if self.health_matrix_period_s > 0.0 and \
                             now - last_matrix >= self.health_matrix_period_s:
