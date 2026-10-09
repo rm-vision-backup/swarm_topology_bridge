@@ -233,6 +233,10 @@ class BridgeNode:
         self.monitor_indices = set()
         self._monitors = []
         self._recv_errors = {}
+        # 收包线程自证存活的标量：只有 recv_loop 写、观测线程读（普通属性，GIL 保证）。
+        # 观测线程**不得**去碰收包线程的 socket（ZMQ socket 非线程安全，2026-10-09 实机
+        # 因跨线程 getsockopt(ZMQ_EVENTS) 堆损坏 SIGABRT）。
+        self._recv_loop_tick = 0.0
         self._link_options_applied = []
         self._link_lock = threading.Lock()
         self._link_seen = set()
@@ -333,23 +337,16 @@ class BridgeNode:
                               stage, src, self.topic_names.get(idx, idx), exc)
 
     def _stuck_sockets(self):
-        """本轮"套接字里有数据但没被取走"的 (src, topic) 列表。
+        """已停用：不再跨线程查询 socket 事件。
 
-        收包线程被饿死/卡住时，ZMQ 会在 socket 上置 POLLIN 而 rx 不前进——这是把
-        "线程没在收"与"链路没数据"分开的直接证据。
+        旧实现从观测线程对**收包线程持有的 socket** 调 ``getsockopt(ZMQ_EVENTS)``。
+        ZMQ socket 非线程安全，ZMQ_EVENTS 还会读 socket 内部队列（libzmq#2163），
+        跨线程查询是未定义行为：2026-10-09 实机 UAV10 桥因此堆损坏
+        （``malloc(): unsorted double linked list corrupted``，SIGABRT）整体死掉。
+        "收包线程被饿死/卡住"改由 ``recv_loop_lag_s``（收包线程自己记的标量）判定，
+        **不要恢复本实现**。字段保留空列表以兼容既有 JSONL 读法。
         """
-        stuck = []
-        candidates = self.monitor_indices or self.key_indices
-        for sock, (src, idx) in list(self.socket_map.items()):
-            if idx not in candidates:
-                continue
-            try:
-                events = int(sock.getsockopt(zmq.EVENTS))
-            except Exception:                              # noqa: BLE001
-                continue
-            if events & zmq.POLLIN:
-                stuck.append("%s/%s" % (src, self.topic_names.get(idx, idx)))
-        return stuck
+        return []
 
     def _health_loop(self):
         period = 1.0 / self.health_sample_hz
@@ -385,6 +382,8 @@ class BridgeNode:
                                    "cpu_s": read_self_cpu_seconds(),
                                    "write_errors": self.health.errors,
                                    "stuck_sockets": self._stuck_sockets(),
+                                   "recv_loop_lag_s": (None if not self._recv_loop_tick
+                                                       else round(now - self._recv_loop_tick, 3)),
                                    "links_seen": seen, "links_unconnected": unconnected,
                                    "link_retries_suppressed": retries})
                     self.health.emit(sample)
@@ -430,6 +429,8 @@ class BridgeNode:
 
     def recv_loop(self):
         while not rospy.is_shutdown():
+            # 自证存活：观测线程读这个标量判断收包线程有没有被饿死（不碰 socket）。
+            self._recv_loop_tick = time.monotonic()
             events = dict(self.poller.poll(timeout=100))
             for s in events:
                 if events[s] != zmq.POLLIN:
