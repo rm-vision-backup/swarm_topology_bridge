@@ -30,13 +30,13 @@ topics:
   # 限频理由（2026-09-22 实测）：机载本机侧这些话题是均匀的（GPS 50 Hz、pose 30 Hz），
   # 但四机同时经电台链路转发时链路拥塞，GCS 侧变成「几十条挤在一起 + 1~3 s 空档」的
   # 团块到达。后果：① GCS 标定节点要求 2 s 窗口内样本跨度 ≥1.9 s，实测八条流同时满足
-  # 0/300，calibration_ready 永远为 False；② 跟随者领机 odom 超时是 1.0 s
-  # （ego_swarm.py:65），空档会打 LEADER_LOST。
+  # 0/300，calibration_ready 永远为 False；② 跟随者领机 odom 超时是 3.0 s
+  # （2026-10-10 由 1.0 s 放宽；ego_swarm.py），秒级空档仍会打断跟随环。
   # 限频只压「不需要满速率」的话题；trajectory_intent 与 uav_task_state 保持不限频
   # （规划层安全相关）。各值都留了最低需求余量，见每行注释。
   - {name: mavros/global_position/global, type: sensor_msgs/NavSatFix, max_freq: 5}   # 标定需 ≥2.5 Hz（2 s 窗口 ≥5 样本）
   - {name: mavros/local_position/pose, type: geometry_msgs/PoseStamped, max_freq: 10} # 标定 ≥2.5 Hz；GCS 取航向
-  - {name: mavros/local_position/odom, type: nav_msgs/Odometry, max_freq: 20}         # 跟随者 PI 环 10 Hz（_FOLLOW_LOOP_HZ）
+  - {name: mavros/local_position/odom, type: nav_msgs/Odometry, max_freq: 12}         # 跟随者 PI 环 10 Hz（_FOLLOW_LOOP_HZ）；2026-10-10 由 20 降为 12（110→66 kbps/流，减空口拥塞）
   - {name: mavros/rc/in, type: mavros_msgs/RCIn, max_freq: 1}                          # 仅供地面监视
   - {name: gp_origin_confirmed, type: std_msgs/Bool, max_freq: 0}
   - {name: trajectory_intent, type: swarm_uav_interfaces/UavTrajectoryIntent, max_freq: 0}

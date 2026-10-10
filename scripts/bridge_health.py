@@ -13,7 +13,8 @@ odom** 失败，而 bridge 对数据面**零可观测**——没有 per-topic �
 4. ``ConnectionMonitor`` —— 用 ZMQ socket monitor 拿**连接级**证据（连上/断开/重连），
    这是"链路在不在"的唯一直接信号（rx 计数只能证明"数据到没到"）。
 
-口径与现场判据对齐：跟随环 ``_FOLLOW_POSE_TIMEOUT_S = 1.0``（ego_swarm.py:65），因此间隔计数
+口径与现场判据对齐：跟随环 ``_FOLLOW_POSE_TIMEOUT_S``（2026-10-10 由 1.0 s 放宽为 3.0 s，
+ego_swarm.py；档位保留以便对照历史），因此间隔计数
 固定统计 >0.2 / >0.5 / >1.0 / >3.0 s 四档，看门狗默认 1.5 s 告警。
 
 配套事实（本次核实）：
