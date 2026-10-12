@@ -9,7 +9,7 @@ topics:
   - {name: mavros/state,                   type: mavros_msgs/State}
   - {name: mavros/time_reference,          type: sensor_msgs/TimeReference}
   - {name: mavros/global_position/global,  type: sensor_msgs/NavSatFix}
-  - {name: mavros/local_position/odom,     type: nav_msgs/Odometry}
+  - {name: swarm_pose,                     type: geometry_msgs/PointStamped}
   - {name: mavros/rc/in,                   type: mavros_msgs/RCIn}
   - {name: leader_fix_origin,              type: sensor_msgs/NavSatFix}
 

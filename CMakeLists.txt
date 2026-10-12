@@ -21,6 +21,7 @@ if(CATKIN_ENABLE_TESTING)
   catkin_add_nosetests(test/test_intent_serialization.py)
   catkin_add_nosetests(test/test_geographic_dependency.py)
   catkin_add_nosetests(test/test_bridge_health.py)
+  catkin_add_nosetests(test/test_bundle.py)
 endif()
 
 install(PROGRAMS
@@ -34,6 +35,7 @@ install(PROGRAMS
 # 否则 relay 起来后 `import bridge_health` 失败（桥接节点直接起不来）。
 install(FILES
   scripts/bridge_health.py
+  scripts/bundle.py
   DESTINATION ${CATKIN_PACKAGE_BIN_DESTINATION}
 )
 

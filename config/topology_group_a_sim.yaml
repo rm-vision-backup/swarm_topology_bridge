@@ -44,21 +44,29 @@ uavs:
 
 topics:
   # 单机状态 Topic: 不限频 (控制/状态 Topic 不得被限频丢弃)
-  - {name: uav_task_state, type: swarm_uav_interfaces/UavTaskState, max_freq: 0}
-  - {name: mavros/state, type: mavros_msgs/State, max_freq: 0}
-  - {name: mavros/global_position/global, type: sensor_msgs/NavSatFix, max_freq: 0}
-  - {name: mavros/local_position/pose, type: geometry_msgs/PoseStamped, max_freq: 0}
-  - {name: gp_origin_confirmed, type: std_msgs/Bool, max_freq: 0}
-  # leader 位姿桥接: FOLLOW_ROUTE follower 订阅 /<leader>/mavros/local_position/odom
-  - {name: mavros/local_position/odom, type: nav_msgs/Odometry, max_freq: 0}
-  - {name: trajectory_intent, type: swarm_uav_interfaces/UavTrajectoryIntent, max_freq: 0}
+  - {name: uav_task_state, type: swarm_uav_interfaces/UavTaskState, max_freq: 0, mode: queue}
+  - {name: mavros/state, type: mavros_msgs/State, max_freq: 0, mode: latest}
+  - {name: mavros/global_position/global, type: sensor_msgs/NavSatFix, max_freq: 0, mode: latest}
+  - {name: mavros/local_position/pose, type: geometry_msgs/PoseStamped, max_freq: 0, mode: latest}
+  - {name: gp_origin_confirmed, type: std_msgs/Bool, max_freq: 0, mode: queue}
+  # 机间轻量位姿流: FOLLOW_ROUTE follower 订阅 /<leader>/swarm_pose（relay 从 odom 抽位置）
+  - {name: swarm_pose, type: geometry_msgs/PointStamped, max_freq: 0, mode: latest}
+  - {name: trajectory_intent, type: swarm_uav_interfaces/UavTrajectoryIntent, max_freq: 0, mode: queue}
   # GPS 时钟偏置（本机 bias 均值 1Hz）：桥到 GCS_A 与其他 UAV，接收端修正机间时间戳
-  - {name: gps_bias, type: std_msgs/Float64, max_freq: 0}
+  - {name: gps_bias, type: std_msgs/Float64, max_freq: 0, mode: queue}
   # GCS_A 全局原点下发给所有 UAV: 机载 gp_origin_receiver 转发到 /mavros/global_position/set_gp_origin
-  - {name: group_a/gp_origin, type: geographic_msgs/GeoPointStamped, max_freq: 0}
+  - {name: group_a/gp_origin, type: geographic_msgs/GeoPointStamped, max_freq: 0, mode: queue}
 
 max_freq: 0
 base_port: 4200
+
+# 跨话题合包（2026-10-12，与生产 topology.yaml 同构）：sim 用 port_offset 区分多节点，
+# bundle 端口 = bundle_port + port_offset；packing: legacy 可对照回归（线不兼容，需全队一致）。
+packing: bundle
+bundle_port: 4200
+bundle_tick_hz: 10.0
+bundle_max_bytes: 1400
+bundle_queue_max: 100
 
 # Topic 桥拓扑: topology[my_name] 表示本机接收这些源的状态 Topic。
 # 仅 GCS_A 需要接收所有 UAV 的状态; UAV 之间仅需要 leader 位姿桥接 (FOLLOW_ROUTE),

@@ -32,7 +32,7 @@ class LinkStatsTest(unittest.TestCase):
     def setUp(self):
         self.clock = FakeClock(100.0)
         self.stats = bridge_health.LinkStats(clock=self.clock)
-        self.names = {5: "mavros/local_position/odom", 6: "mavros/rc/in",
+        self.names = {5: "swarm_pose", 6: "mavros/rc/in",
                       8: "trajectory_intent"}
 
     def test_remote_counts_and_gap_accounting(self):
@@ -74,7 +74,7 @@ class LinkStatsTest(unittest.TestCase):
 
         summary = self.stats.summary(self.names, {5}, now=self.clock(), stale_age_s=1.5)
         row = summary["remote"][0]
-        self.assertEqual(row["topic"], "mavros/local_position/odom")
+        self.assertEqual(row["topic"], "swarm_pose")
         self.assertEqual(row["srcs"], 2)
         self.assertEqual(row["rx"], 3)
         self.assertEqual(row["age_max_src"], "UAV8")
@@ -85,14 +85,14 @@ class LinkStatsTest(unittest.TestCase):
         self.stats.note_rx("UAV8", 5)
         self.stats.note_rx("UAV8", 6)
         summary = self.stats.summary(self.names, {5}, now=self.clock())
-        self.assertEqual([row["topic"] for row in summary["remote"]], ["mavros/local_position/odom"])
+        self.assertEqual([row["topic"] for row in summary["remote"]], ["swarm_pose"])
         self.assertEqual([row["topic"] for row in summary["local"]], [])
 
     def test_matrix_skips_non_key_topics(self):
         self.stats.note_rx("UAV8", 5)
         self.stats.note_rx("UAV8", 6)
         rows = self.stats.matrix(self.names, {5}, now=self.clock())
-        self.assertEqual([row["topic"] for row in rows], ["mavros/local_position/odom"])
+        self.assertEqual([row["topic"] for row in rows], ["swarm_pose"])
 
     def test_stall_events_start_then_end(self):
         self.stats.note_rx("UAV8", 5)
@@ -280,6 +280,56 @@ class MiscHelpersTest(unittest.TestCase):
         self.assertEqual(bridge_health._monitor_event_name(zmq.EVENT_CONNECT_RETRIED),
                          "connect_retried")
         self.assertTrue(bridge_health._monitor_event_name(999999).startswith("code_"))
+
+
+class BundleStatsTest(unittest.TestCase):
+    """合包（packing=bundle）埋点：整源计数、summary.sources、note_local_drop(n)、bundle stall。"""
+
+    def setUp(self):
+        self.clock = FakeClock(100.0)
+        self.stats = bridge_health.LinkStats(clock=self.clock)
+        self.names = {5: "swarm_pose", 6: "mavros/rc/in"}
+
+    def test_bundle_rx_counts_and_gap(self):
+        self.stats.note_bundle_rx("UAV8", frames=1, msgs=4, nbytes=300)
+        self.clock.advance(0.05)
+        self.stats.note_bundle_rx("UAV8", frames=2, msgs=5, nbytes=400)  # 切了 2 帧
+        self.clock.advance(1.20)                                          # 一次 1.2 s 整源空档
+        self.stats.note_bundle_rx("UAV8", frames=1, msgs=3, nbytes=150)
+        self.clock.advance(0.10)
+
+        out = self.stats.summary(self.names, {5}, now=self.clock())
+        self.assertEqual(len(out["sources"]), 1)
+        s = out["sources"][0]
+        self.assertEqual((s["src"], s["frames"], s["msgs"], s["bytes"]), ("UAV8", 4, 12, 850))
+        self.assertAlmostEqual(s["gap_max_ms"], 1200.0, places=1)
+        self.assertAlmostEqual(s["age_ms"], 100.0, places=1)
+        self.assertGreaterEqual(s["gt"]["gt1000"], 1)
+
+    def test_bundle_totals(self):
+        self.stats.note_bundle_tx(frames=2, msgs=6, nbytes=900)
+        self.stats.note_bundle_tx(frames=1, msgs=3, nbytes=450)
+        self.stats.note_bundle_rx("UAV10", frames=3, msgs=9, nbytes=1200)
+        frame_tx, msg_tx, byte_tx, frame_rx = self.stats.bundle_totals()
+        self.assertEqual((frame_tx, msg_tx, byte_tx, frame_rx), (3, 9, 1350, 3))
+
+    def test_note_local_drop_with_n(self):
+        self.stats.note_local_drop(5, 3)
+        self.stats.note_local_rx(5)
+        self.stats.note_tx(5)
+        out = self.stats.summary(self.names, {5}, now=self.clock())
+        row = out["local"][0]
+        self.assertEqual(row["drop"], 3)
+        self.assertEqual(row["rx"], 1)
+
+    def test_bundle_stall_scope(self):
+        self.stats.note_bundle_rx("UAV12", frames=1, msgs=2, nbytes=100)
+        self.clock.advance(2.0)                                          # 超过 warn_s
+        events = self.stats.poll_stalls(self.clock(), warn_s=1.5,
+                                        key_filter=lambda scope, src, idx: scope == "bundle")
+        self.assertEqual(len(events), 1)
+        self.assertEqual(events[0]["scope"], "bundle")
+        self.assertEqual(events[0]["src"], "UAV12")
 
 
 if __name__ == "__main__":

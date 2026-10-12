@@ -54,8 +54,11 @@ def _import_bridge_health():
 (LinkStats, HealthWriter, apply_link_options,
  ConnectionMonitor, read_loadavg, read_self_cpu_seconds) = _import_bridge_health()
 
+# 跨话题合包纯逻辑（同目录，随 bridge_health 一起 install；见 bundle.py 模块头）
+from bundle import BundleBuilder, TopicBuffer, decode_frames, BundleError  # noqa: E402
+
 DEFAULT_HEALTH_KEY_TOPICS = (
-    "mavros/local_position/odom",
+    "swarm_pose",
     "mavros/local_position/pose",
     "mavros/state",
     "trajectory_intent",
@@ -64,11 +67,11 @@ DEFAULT_HEALTH_KEY_TOPICS = (
 # 看门狗默认只盯"高频周期性"话题：trajectory_intent / uav_task_state / gp_origin_confirmed 是
 # 事件驱动或一次性（首帧之后长期静默属正常），把它们纳入会持续产生假停顿事件。
 DEFAULT_STALL_TOPICS = (
-    "mavros/local_position/odom",
+    "swarm_pose",
     "mavros/local_position/pose",
 )
-# 连接级事件默认只监控 odom（关键链路）；对每个被监控话题每源一个 monitor socket。
-DEFAULT_MONITOR_TOPICS = ("mavros/local_position/odom",)
+# 连接级事件默认只监控 swarm_pose（机间位姿关键链路）；对每个被监控话题每源一个 monitor socket。
+DEFAULT_MONITOR_TOPICS = ("swarm_pose",)
 
 
 def ensure_global(name):
@@ -86,6 +89,23 @@ class BridgeNode:
         self.topology = rospy.get_param('~topology')
         self.services = rospy.get_param('~services', [])
         self.service_base_port = int(rospy.get_param('~service_base_port', self.base_port + 10000))
+
+        # 合包（跨话题 bundle）参数；**非法值一律兜底、绝不阻断启动**（同 _load_health_config 原则）。
+        def _p(name, default, cast):
+            try:
+                return cast(rospy.get_param(name, default))
+            except Exception as exc:                 # noqa: BLE001
+                rospy.logwarn("bridge: bad ~%s (%s), using default %r", name, exc, default)
+                return default
+
+        self.packing = str(_p('~packing', 'legacy', str)).strip().lower()
+        if self.packing not in ('bundle', 'legacy'):
+            rospy.logwarn("bridge: unknown ~packing=%r, fallback to legacy", self.packing)
+            self.packing = 'legacy'
+        self.bundle_tick_hz = max(0.5, float(_p('~bundle_tick_hz', 10.0, float)))
+        self.bundle_max_bytes = int(_p('~bundle_max_bytes', 1400, int))
+        self.bundle_queue_max = int(_p('~bundle_queue_max', 100, int))
+        self.bundle_port = int(_p('~bundle_port', self.base_port, int))
 
         override_name = rospy.get_param('~uav_name', None)
         self.my_name = override_name if override_name else socket.gethostname()
@@ -117,6 +137,7 @@ class BridgeNode:
         self.send_counts = {}
         # 每话题限频; None 表示不限频
         self.topic_limits = {}
+        self.topic_modes = {}          # 合包：每话题 latest|queue
         self._load_health_config()
 
         # 3) 动态加载消息类型
@@ -128,48 +149,90 @@ class BridgeNode:
             self.msg_classes[i] = cls
             limit = t.get('max_freq', self.max_freq)
             self.topic_limits[i] = None if limit is None or float(limit) <= 0 else float(limit)
+            mode = t.get('mode')
+            if mode not in ('latest', 'queue'):
+                # 默认推断：不限频（max_freq 0/null，多为事件类）→ queue 保序全量；限频（周期类）→ latest
+                mode = 'queue' if self.topic_limits[i] is None else 'latest'
+            self.topic_modes[i] = mode
 
         for i in range(len(self.topics)):
             self.window_start[i] = time.time()
             self.send_counts[i] = 0
 
-        # 4) 初始化 ZMQ PUB
+        # 4) 初始化 ZMQ PUB（legacy: 每话题一条；bundle: 每节点一条合包流）
         my_offset = self.uav_port_offsets.get(self.my_name, 0)
-        for i, _ in enumerate(self.topics):
+        if self.packing == 'bundle':
             s = self.context.socket(zmq.PUB)
             self._link_options_applied = self._apply_link_options(s)
-            s.bind("tcp://*:%d" % (self.topic_ports[i] + my_offset))
-            self.pub_sockets[i] = s
-            self.pub_locks[i] = Lock()
-        rospy.loginfo("bridge: my_name=%s, port_offset=%d, topics=%d, health=%s",
-                      self.my_name, my_offset, len(self.topics),
+            s.bind("tcp://*:%d" % (self.bundle_port + my_offset))
+            self.bundle_pub = s
+            self.bundle_lock = Lock()
+            self.buffers = {}
+            for i in range(len(self.topics)):
+                self.buffers[i] = TopicBuffer(i, self.topic_modes[i], self.topic_limits[i],
+                                              self.bundle_tick_hz, self.bundle_queue_max)
+            self.builder = BundleBuilder(self.bundle_max_bytes)
+            self._tick_index = 0
+            self._flush_drop_seen = {i: 0 for i in range(len(self.topics))}
+        else:
+            for i, _ in enumerate(self.topics):
+                s = self.context.socket(zmq.PUB)
+                self._link_options_applied = self._apply_link_options(s)
+                s.bind("tcp://*:%d" % (self.topic_ports[i] + my_offset))
+                self.pub_sockets[i] = s
+                self.pub_locks[i] = Lock()
+        rospy.loginfo("bridge: my_name=%s, port_offset=%d, packing=%s, topics=%d, health=%s",
+                      self.my_name, my_offset, self.packing, len(self.topics),
                       self.health.path or "(disabled)")
 
-        # 5) 初始化 ZMQ SUB 与对应 ROS Publisher
+        # 5) 初始化 ZMQ SUB 与对应 ROS Publisher（legacy: 每(源×话题)；bundle: 每源一条）
         src_list = self.topology.get(self.my_name, [])
         rospy.loginfo("bridge: recv sources=%s", ",".join(src_list) if src_list else "(none)")
-        for src in src_list:
-            ip = self.uav_ip[src]
-            src_offset = self.uav_port_offsets.get(src, 0)
-            for i in range(len(self.topics)):
+        if self.packing == 'bundle':
+            for src in src_list:
+                ip = self.uav_ip[src]
+                src_offset = self.uav_port_offsets.get(src, 0)
                 s = self.context.socket(zmq.SUB)
                 self._apply_link_options(s)
                 s.setsockopt(zmq.SUBSCRIBE, b"")
-                if i in self.monitor_indices:
-                    # 连接级证据：只有它能把"链路断/重连"与"链路在但没数据"分开。
-                    # 必须在 connect() 之前挂上，否则会漏掉首次 connected（环回链路尤其快）。
+                if self.monitor_indices:
+                    # 整源一条 monitor：连接级事件以"源"为单位（idx=-1）
                     self._monitors.append(ConnectionMonitor(
                         s,
-                        lambda name, endpoint, value, _src=src, _idx=i:
-                        self._on_link_event(_src, _idx, name, endpoint, value),
-                        label="%s/%s" % (src, self.topic_names.get(i, i))))
-                s.connect("tcp://%s:%d" % (ip, self.topic_ports[i] + src_offset))
+                        lambda name, endpoint, value, _src=src:
+                        self._on_link_event(_src, -1, name, endpoint, value),
+                        label="%s/(bundle)" % src))
+                s.connect("tcp://%s:%d" % (ip, self.bundle_port + src_offset))
                 self.sub_sockets.append(s)
                 self.poller.register(s, zmq.POLLIN)
-                self.socket_map[s] = (src, i)
-                pub_name = ensure_global(self.topics[i]['name'])
-                pub_full = "/%s%s" % (src, pub_name)
-                self.publishers[(src, i)] = rospy.Publisher(pub_full, self.msg_classes[i], queue_size=10)
+                self.socket_map[s] = src
+                for i in range(len(self.topics)):
+                    pub_full = "/%s%s" % (src, ensure_global(self.topics[i]['name']))
+                    self.publishers[(src, i)] = rospy.Publisher(pub_full, self.msg_classes[i],
+                                                                queue_size=10)
+        else:
+            for src in src_list:
+                ip = self.uav_ip[src]
+                src_offset = self.uav_port_offsets.get(src, 0)
+                for i in range(len(self.topics)):
+                    s = self.context.socket(zmq.SUB)
+                    self._apply_link_options(s)
+                    s.setsockopt(zmq.SUBSCRIBE, b"")
+                    if i in self.monitor_indices:
+                        # 连接级证据：只有它能把"链路断/重连"与"链路在但没数据"分开。
+                        # 必须在 connect() 之前挂上，否则会漏掉首次 connected（环回链路尤其快）。
+                        self._monitors.append(ConnectionMonitor(
+                            s,
+                            lambda name, endpoint, value, _src=src, _idx=i:
+                            self._on_link_event(_src, _idx, name, endpoint, value),
+                            label="%s/%s" % (src, self.topic_names.get(i, i))))
+                    s.connect("tcp://%s:%d" % (ip, self.topic_ports[i] + src_offset))
+                    self.sub_sockets.append(s)
+                    self.poller.register(s, zmq.POLLIN)
+                    self.socket_map[s] = (src, i)
+                    pub_name = ensure_global(self.topics[i]['name'])
+                    pub_full = "/%s%s" % (src, pub_name)
+                    self.publishers[(src, i)] = rospy.Publisher(pub_full, self.msg_classes[i], queue_size=10)
 
         # 6) 初始化 ROS 订阅
         for i, t in enumerate(self.topics):
@@ -177,10 +240,14 @@ class BridgeNode:
             cls = self.msg_classes[i]
             rospy.Subscriber(sub_name, cls, self._make_cb(i), queue_size=10)
 
-        # 7) 启动 Topic 接收线程
+        # 7) 启动 Topic 接收线程；bundle 模式再启动合包 flush 线程
         self.recv_thread = threading.Thread(target=self.recv_loop)
         self.recv_thread.daemon = True
         self.recv_thread.start()
+        if self.packing == 'bundle':
+            self.flush_thread = threading.Thread(target=self._flush_loop)
+            self.flush_thread.daemon = True
+            self.flush_thread.start()
 
         # 8) 初始化通用 Service 代理
         self._service_init()
@@ -194,6 +261,13 @@ class BridgeNode:
             "event": "health_start", "path": self.health.path or "", "host": socket.gethostname(),
             "sample_hz": self.health_sample_hz, "stall_warn_s": self.stall_warn_s,
             "matrix_period_s": self.health_matrix_period_s,
+            "packing": self.packing,
+            "bundle_tick_hz": self.bundle_tick_hz if self.packing == 'bundle' else None,
+            "bundle_port": self.bundle_port if self.packing == 'bundle' else None,
+            "bundle_max_bytes": self.bundle_max_bytes if self.packing == 'bundle' else None,
+            "topic_modes": ({self.topic_names.get(i, i): self.topic_modes[i]
+                             for i in range(len(self.topics))}
+                            if self.packing == 'bundle' else None),
             "key_topics": sorted(self.health_key_topics),
             "stall_topics": sorted(self.stall_topics),
             "monitor_topics": sorted(self.monitor_topics),
@@ -313,7 +387,7 @@ class BridgeNode:
                 self._link_suppressed[(src, idx)] = self._link_suppressed.get((src, idx), 0) + 1
             return
         self._record_bridge_event({"event": "link", "link_event": name, "src": src,
-                                   "topic": self.topic_names.get(idx, str(idx)),
+                                   "topic": self.topic_names.get(idx, "(bundle)" if idx < 0 else str(idx)),
                                    "endpoint": endpoint, "value": value})
 
     def _shutdown_health(self):
@@ -327,7 +401,11 @@ class BridgeNode:
 
     def _record_error(self, sock, stage, exc):
         """接收线程内的异常：写事件 + 节流 rosout，**不再让线程退出**。"""
-        src, idx = self.socket_map.get(sock, ("?", -1))
+        mapped = self.socket_map.get(sock, ("?", -1))
+        if isinstance(mapped, tuple):                  # legacy: (src, topic_idx)
+            src, idx = mapped
+        else:                                          # bundle: socket_map[s] = src (str)
+            src, idx = mapped, -1
         record = {"event": "error", "stage": stage, "src": src,
                   "topic": self.topic_names.get(idx, str(idx)),
                   "error": "%s: %s" % (type(exc).__name__, exc),
@@ -402,6 +480,13 @@ class BridgeNode:
         def cb(msg):
             now = time.time()
             self.stats.note_local_rx(idx)
+            if self.packing == 'bundle':
+                # 合包：回调只序列化入缓冲；限频/丢弃/发送都交给 flush 线程
+                # （latest 的覆盖、queue 的溢出才计 drop，见 _flush_loop）。
+                buff = io.BytesIO()
+                msg.serialize(buff)
+                self.buffers[idx].add(buff.getvalue())
+                return
             elapsed = now - self.window_start[idx]
             limit = self.topic_limits[idx]
             discard = False
@@ -427,6 +512,44 @@ class BridgeNode:
                 self.send_counts[idx] = 0
         return cb
 
+    def _flush_loop(self):
+        """合包发送线程：每 1/tick_hz 把各话题缓冲里的 due 消息打成 bundle 帧发出。
+
+        **本线程只碰 self.bundle_pub**（收包线程只碰 SUB）——ZMQ socket 绝不跨线程共享
+        （见 _stuck_sockets 的堆损坏记录）。落后不追爆：下一拍重新对齐 wall clock。
+        """
+        period = 1.0 / self.bundle_tick_hz
+        next_t = time.monotonic() + period
+        while not rospy.is_shutdown():
+            try:
+                entries = []
+                for i in range(len(self.topics)):
+                    buf = self.buffers[i]
+                    for payload in buf.take_due(self._tick_index):
+                        entries.append((i, payload))
+                    drop = buf.dropped()
+                    delta = drop - self._flush_drop_seen[i]
+                    if delta:
+                        self.stats.note_local_drop(i, delta)
+                        self._flush_drop_seen[i] = drop
+                if entries:
+                    frames = self.builder.build(self._tick_index, entries)
+                    with self.bundle_lock:
+                        self.bundle_pub.send_multipart(frames, flags=0)
+                    for i, _ in entries:
+                        self.stats.note_tx(i)
+                    self.stats.note_bundle_tx(len(frames), len(entries),
+                                              sum(len(f) for f in frames))
+                self._tick_index += 1
+            except Exception as exc:                       # noqa: BLE001 - flush 线程绝不退出
+                rospy.logerr_throttle(30.0, "bridge: flush loop error (%s)", exc)
+            sleep_for = next_t - time.monotonic()
+            if sleep_for > 0:
+                time.sleep(sleep_for)
+                next_t += period
+            else:
+                next_t = time.monotonic() + period          # 落后：不追爆，重新对齐
+
     def recv_loop(self):
         while not rospy.is_shutdown():
             # 自证存活：观测线程读这个标量判断收包线程有没有被饿死（不碰 socket）。
@@ -440,6 +563,36 @@ class BridgeNode:
                 # "线程死了"与"链路没数据"）。现改为：记事件、跳过该条、继续服务。
                 if s in self._recv_errors and self._recv_errors[s] >= 5:
                     time.sleep(0.05)                   # 自旋保护：持续异常时不要把 poll 打成忙循环
+                if self.packing == 'bundle':
+                    try:
+                        frames = s.recv_multipart(flags=0)
+                    except Exception as exc:               # noqa: BLE001
+                        self._recv_errors[s] = self._recv_errors.get(s, 0) + 1
+                        if not rospy.is_shutdown():
+                            self._record_error(s, "recv", exc)
+                        continue
+                    src = self.socket_map[s]
+                    self._recv_errors.pop(s, None)
+                    try:
+                        entries = decode_frames(frames)
+                    except BundleError as exc:
+                        self._record_error(s, "bundle_decode", exc)
+                        continue
+                    self.stats.note_bundle_rx(src, len(frames), len(entries),
+                                              sum(len(f) for f in frames))
+                    for idx, payload in entries:
+                        try:
+                            msg = self.msg_classes[idx]()
+                            msg.deserialize(payload)
+                        except Exception as exc:           # noqa: BLE001
+                            self._record_error(s, "deserialize", exc)
+                            continue
+                        self.stats.note_rx(src, idx)
+                        try:
+                            self.publishers[(src, idx)].publish(msg)
+                        except Exception as exc:           # noqa: BLE001
+                            self._record_error(s, "publish", exc)
+                    continue
                 try:
                     payload = s.recv(flags=0)
                 except Exception as exc:               # noqa: BLE001

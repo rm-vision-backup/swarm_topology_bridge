@@ -2,7 +2,8 @@
 """桥接数据面观测与链路加固（纯逻辑：只依赖 stdlib + zmq，可无 ROS 单测）。
 
 为什么存在：2026-09-22（三机）与 2026-09-23（四机）两轮实飞 coverage 都因**跟随者收不到领机
-odom** 失败，而 bridge 对数据面**零可观测**——没有 per-topic 计数、没有最后到达时间、没有断链
+位姿流**（当时为 mavros/local_position/odom，2026-10-11 起改为轻量 swarm_pose）失败，而 bridge
+对数据面**零可观测**——没有 per-topic 计数、没有最后到达时间、没有断链
 日志，逐层定位只能靠排除法（见 quality_reports/2026-10-08_two_rounds_coverage_failure_root_cause.md）。
 
 本模块提供四件事：
@@ -49,6 +50,11 @@ def _empty_row():
             "stall_since": None, "stalls": 0, "last_rx": None}
 
 
+def _empty_bundle_row():
+    """整源（bundle）行：在 _empty_row 基础上加帧/条/字节计数。"""
+    return dict(_empty_row(), frames=0, msgs=0, bytes=0)
+
+
 def _gt_field(row):
     return {("gt%d" % int(thr * 1e3)): row["gaps"][thr] for thr in GAP_THRESHOLDS_S}
 
@@ -87,6 +93,9 @@ class LinkStats:
         self._local: dict = {}     # topic_idx -> 行
         self._remote: dict = {}    # (src, topic_idx) -> 行
         self._reported: dict = {}  # 上次上报的计数（用于 drx）
+        # 合包（packing=bundle）专用：整源级收发 + 本机发送侧累计
+        self._bundles: dict = {}   # src -> 行（整源，未按话题拆）
+        self._bundle_tx = {"frames": 0, "msgs": 0, "bytes": 0}
 
     # ---------------------------------------------------------------- 埋点
     def note_local_rx(self, idx):
@@ -102,9 +111,9 @@ class LinkStats:
         with self._lock:
             self._local.setdefault(idx, dict(_empty_row(), rx=0, tx=0, drop=0))["tx"] += 1
 
-    def note_local_drop(self, idx):
+    def note_local_drop(self, idx, n=1):
         with self._lock:
-            self._local.setdefault(idx, dict(_empty_row(), rx=0, tx=0, drop=0))["drop"] += 1
+            self._local.setdefault(idx, dict(_empty_row(), rx=0, tx=0, drop=0))["drop"] += int(n)
 
     def note_rx(self, src, idx):
         now = self._clock()
@@ -114,6 +123,26 @@ class LinkStats:
                 _bump_gap(row, now - row["last_rx"])
             row["last_rx"] = now
             row["rx"] = row.get("rx", 0) + 1
+
+    # --- 合包（packing=bundle）埋点：本机发送侧累计 + 逐源整包计数 -------
+    def note_bundle_tx(self, frames, msgs, nbytes):
+        """本机一个 tick 实发：帧数 / 消息条数 / 字节数。"""
+        with self._lock:
+            self._bundle_tx["frames"] += int(frames)
+            self._bundle_tx["msgs"] += int(msgs)
+            self._bundle_tx["bytes"] += int(nbytes)
+
+    def note_bundle_rx(self, src, frames, msgs, nbytes=0):
+        """收到一个源的 bundle：按整源计帧/条/字节并维护到达间隔（整源静默=最可靠停顿信号）。"""
+        now = self._clock()
+        with self._lock:
+            row = self._bundles.setdefault(src, _empty_bundle_row())
+            if row["last_rx"] is not None:
+                _bump_gap(row, now - row["last_rx"])
+            row["last_rx"] = now
+            row["frames"] += int(frames)
+            row["msgs"] += int(msgs)
+            row["bytes"] += int(nbytes)
 
     # ------------------------------------------------------------ 停顿检测
     def poll_stalls(self, now, warn_s, key_filter=None):
@@ -137,6 +166,11 @@ class LinkStats:
                 if key_filter is not None and not key_filter("local", None, idx):
                     continue
                 events.extend(self._pair_events(row, "local", None, idx, now, warn_s))
+            # 合包：整源静默是比"逐话题静默"更强的机间链路判据（scope="bundle"，src 必填）
+            for src, row in self._bundles.items():
+                if key_filter is not None and not key_filter("bundle", src, None):
+                    continue
+                events.extend(self._pair_events(row, "bundle", src, None, now, warn_s))
         return events
 
     @staticmethod
@@ -210,7 +244,18 @@ class LinkStats:
                     "gap_max_ms": round(worst * 1e3, 1), "gt": gt,
                     "stalls": sum(row["stalls"] for _, row in srcs),
                 })
-        return {"local": local_rows, "remote": remote_rows}
+        sources = []
+        with self._lock:
+            for src, row in sorted(self._bundles.items()):
+                sources.append({
+                    "src": src, "frames": row["frames"], "msgs": row["msgs"],
+                    "bytes": row["bytes"],
+                    "age_ms": None if row["last_rx"] is None
+                    else round((now - row["last_rx"]) * 1e3, 1),
+                    "gap_max_ms": round(row["gap_max"] * 1e3, 1), "gt": _gt_field(row),
+                    "stalls": row["stalls"],
+                })
+        return {"local": local_rows, "remote": remote_rows, "sources": sources}
 
     def matrix(self, names, key_indices, now=None):
         """逐 (源, 话题) 明细（默认每 10 s 一行）：定位到具体哪条链。"""
@@ -236,6 +281,13 @@ class LinkStats:
                     sum(r["tx"] for r in self._local.values()),
                     sum(r.get("drop", 0) for r in self._local.values()),
                     sum(r.get("rx", 0) for r in self._remote.values()))
+
+    def bundle_totals(self):
+        """合包整体计数：(本机发帧数, 发条数, 发字节数, 收帧数)。"""
+        with self._lock:
+            return (self._bundle_tx["frames"], self._bundle_tx["msgs"],
+                    self._bundle_tx["bytes"],
+                    sum(r["frames"] for r in self._bundles.values()))
 
 class HealthWriter:
     """JSONL 追加写。``path=None`` → 空实现。
