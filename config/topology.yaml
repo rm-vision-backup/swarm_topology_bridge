@@ -44,7 +44,7 @@ topics:
   - {name: trajectory_intent, type: swarm_uav_interfaces/UavTrajectoryIntent, max_freq: 0, mode: queue}
   - {name: gps_bias, type: std_msgs/Float64, max_freq: 0, mode: queue}
   - {name: group_a/gp_origin, type: geographic_msgs/GeoPointStamped, max_freq: 0, mode: queue}
-  - {name: mavros/battery,            type: mavros_msgs/BatteryStatus, max_freq: 1, mode: latest}
+  - {name: mavros/battery,            type: sensor_msgs/BatteryState,  max_freq: 1, mode: latest}
   - {name: mavros/gpsstatus/gps1/raw, type: mavros_msgs/GPSRAW,        max_freq: 1, mode: latest}
 
 max_freq: 0

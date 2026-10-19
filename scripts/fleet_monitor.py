@@ -62,7 +62,8 @@ def render_table(uavs, snapshot, now, stale_s):
 
 def main():
     import rospy
-    from mavros_msgs.msg import BatteryStatus, GPSRAW, State
+    from mavros_msgs.msg import GPSRAW, State
+    from sensor_msgs.msg import BatteryState
 
     rospy.init_node("fleet_monitor")
     uav_count = int(rospy.get_param("~uav_count", 16))
@@ -85,7 +86,7 @@ def main():
             snap.update(name, "fix_type", msg.fix_type)
 
         rospy.Subscriber(base + "state", State, on_state, queue_size=2)
-        rospy.Subscriber(base + "battery", BatteryStatus, on_battery,
+        rospy.Subscriber(base + "battery", BatteryState, on_battery,
                          queue_size=2)
         rospy.Subscriber(base + "gpsstatus/gps1/raw", GPSRAW, on_gps,
                          queue_size=2)
