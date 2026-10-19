@@ -1,0 +1,16 @@
+<launch>
+  <!-- GCS-only fleet monitor: reads bridge-forwarded /UAVn/mavros/... topics.
+       roslaunch starts a local roscore automatically when none is running;
+       if the GCS stack already has a master, this attaches to it. -->
+  <arg name="uav_count" default="16" />
+  <arg name="uav_prefix" default="UAV" />
+  <arg name="refresh_hz" default="1.0" />
+  <arg name="stale_s" default="3.0" />
+
+  <node pkg="swarm_topology_bridge" type="fleet_monitor.py" name="fleet_monitor" output="screen">
+    <param name="uav_count" value="$(arg uav_count)" />
+    <param name="uav_prefix" value="$(arg uav_prefix)" />
+    <param name="refresh_hz" value="$(arg refresh_hz)" />
+    <param name="stale_s" value="$(arg stale_s)" />
+  </node>
+</launch>

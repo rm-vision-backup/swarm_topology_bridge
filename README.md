@@ -32,6 +32,7 @@
     │   ├── bridge_group_a_real.launch # 实机单机 bridge 入口（生产 topology.yaml）
     │   ├── test_sim_swarm.launch     # 仿真多机集成测试启动文件
     │   ├── test_sim_single.launch    # 仿真单机回环测试启动文件
+    │   ├── fleet_monitor.launch      # GCS 机队状态监视（无 roscore 时自动启动）
     │   └── topology_group_a_sim.launch # Group A 仿真拓扑 launch（bridge 入口）
     ├── package.xml
     └── scripts
@@ -283,11 +284,14 @@ roslaunch swarm_topology_bridge test.launch uav_name:=UAV6
 GPS fix type：
 
 ```bash
-rosrun swarm_topology_bridge fleet_monitor.py
+roslaunch swarm_topology_bridge fleet_monitor.launch
 ```
 
-每字段超过 3 s 未更新显示 `--`。参数：`~uav_count`（默认 16）、
-`~uav_prefix`（默认 `UAV`）、`~refresh_hz`（默认 1.0）、`~stale_s`（默认 3.0）。
+roslaunch 在当前没有 Master 时会自动启动 roscore；GCS 栈已运行时则直接接入现有 Master。
+每字段超过 3 s 未更新显示 `--`。可用 launch 参数覆盖：
+`uav_count`（默认 16）、`uav_prefix`（默认 `UAV`）、`refresh_hz`（默认 1.0）、
+`stale_s`（默认 3.0），例如
+`roslaunch swarm_topology_bridge fleet_monitor.launch uav_count:=6`。
 
 ## 5. 数据面观测与链路加固（2026-10-08 增）
 
