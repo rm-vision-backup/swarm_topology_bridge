@@ -22,6 +22,7 @@ if(CATKIN_ENABLE_TESTING)
   catkin_add_nosetests(test/test_geographic_dependency.py)
   catkin_add_nosetests(test/test_bridge_health.py)
   catkin_add_nosetests(test/test_bundle.py)
+  catkin_add_nosetests(test/test_udp_bundle.py)
 endif()
 
 install(PROGRAMS
@@ -36,6 +37,7 @@ install(PROGRAMS
 install(FILES
   scripts/bridge_health.py
   scripts/bundle.py
+  scripts/udp_bundle.py
   DESTINATION ${CATKIN_PACKAGE_BIN_DESTINATION}
 )
 

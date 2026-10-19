@@ -53,6 +53,8 @@ service_base_port: 14000
 # 每 tick 一帧装全部话题」，以减空口包数（电台是包率瓶颈，见 quality_reports/2026-10-12_airlink_scaling_test.md §8）。
 # packing: legacy 即回滚到旧的逐话题逐帧路径（无需回退二进制）；同队必须同 packing（线不兼容）。
 packing: bundle
+# bundle 传输层：tcp = 现有 ZMQ/TCP；udp = 原始 UDP 单播（去 ACK/重传，全队必须一致）
+bundle_transport: tcp
 bundle_port: 4200
 bundle_tick_hz: 10.0
 bundle_max_bytes: 1400

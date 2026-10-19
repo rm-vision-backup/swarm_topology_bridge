@@ -63,6 +63,8 @@ base_port: 4200
 # 跨话题合包（2026-10-12，与生产 topology.yaml 同构）：sim 用 port_offset 区分多节点，
 # bundle 端口 = bundle_port + port_offset；packing: legacy 可对照回归（线不兼容，需全队一致）。
 packing: bundle
+# bundle 传输层：tcp = 现有 ZMQ/TCP；udp = 原始 UDP 单播（去 ACK/重传，全队必须一致）
+bundle_transport: tcp
 bundle_port: 4200
 bundle_tick_hz: 10.0
 bundle_max_bytes: 1400

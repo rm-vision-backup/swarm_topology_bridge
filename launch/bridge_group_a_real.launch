@@ -23,6 +23,7 @@
   <!-- 合包（跨话题 bundle）。默认空 = 不覆盖，取 config YAML 里的 packing 等；
        仅在需要单点回滚时传 packing:=legacy（roslaunch 会丢弃空值 param，故空 = 走 YAML）。 -->
   <arg name="packing" default="" />
+  <arg name="bundle_transport" default="" />
   <arg name="bundle_tick_hz" default="" />
   <arg name="bundle_max_bytes" default="" />
   <arg name="bundle_queue_max" default="" />
@@ -42,6 +43,7 @@
     <param name="zmq_dealer_sndtimeo_ms" value="$(arg zmq_dealer_sndtimeo_ms)" />
     <!-- 仅当显式传参时才覆盖 YAML（unless 避免空串把 YAML 的 packing 冲掉） -->
     <param name="packing" value="$(arg packing)" unless="$(eval arg('packing') == '')" />
+    <param name="bundle_transport" value="$(arg bundle_transport)" unless="$(eval arg('bundle_transport') == '')" />
     <param name="bundle_tick_hz" value="$(arg bundle_tick_hz)" unless="$(eval arg('bundle_tick_hz') == '')" />
     <param name="bundle_max_bytes" value="$(arg bundle_max_bytes)" unless="$(eval arg('bundle_max_bytes') == '')" />
     <param name="bundle_queue_max" value="$(arg bundle_queue_max)" unless="$(eval arg('bundle_queue_max') == '')" />

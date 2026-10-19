@@ -52,7 +52,7 @@ def _empty_row():
 
 def _empty_bundle_row():
     """整源（bundle）行：在 _empty_row 基础上加帧/条/字节计数。"""
-    return dict(_empty_row(), frames=0, msgs=0, bytes=0)
+    return dict(_empty_row(), frames=0, msgs=0, bytes=0, incomplete=0)
 
 
 def _gt_field(row):
@@ -96,6 +96,9 @@ class LinkStats:
         # 合包（packing=bundle）专用：整源级收发 + 本机发送侧累计
         self._bundles: dict = {}   # src -> 行（整源，未按话题拆）
         self._bundle_tx = {"frames": 0, "msgs": 0, "bytes": 0}
+        # UDP bundle（transport=udp）专用计数；TCP 下保持全 0
+        self._udp_tx = {"datagrams": 0, "errors": 0, "oversize": 0, "blocked": 0}
+        self._udp_rx = {"unknown": 0, "decode": 0, "truncated": 0}
 
     # ---------------------------------------------------------------- 埋点
     def note_local_rx(self, idx):
@@ -143,6 +146,38 @@ class LinkStats:
             row["frames"] += int(frames)
             row["msgs"] += int(msgs)
             row["bytes"] += int(nbytes)
+
+    # --- UDP bundle 埋点（transport=udp） -------------------------------
+    def note_udp_tx(self, datagrams=0, errors=0, oversize=0, blocked=0):
+        with self._lock:
+            self._udp_tx["datagrams"] += int(datagrams)
+            self._udp_tx["errors"] += int(errors)
+            self._udp_tx["oversize"] += int(oversize)
+            self._udp_tx["blocked"] += int(blocked)
+
+    def note_udp_incomplete(self, src, n=1):
+        """一个多帧 tick 因丢帧/乱序被丢弃。"""
+        with self._lock:
+            row = self._bundles.setdefault(src, _empty_bundle_row())
+            row["incomplete"] = row.get("incomplete", 0) + int(n)
+
+    def note_udp_rx_anomaly(self, kind, n=1):
+        """kind ∈ {unknown, decode, truncated}。"""
+        with self._lock:
+            if kind in self._udp_rx:
+                self._udp_rx[kind] += int(n)
+
+    def udp_summary(self):
+        with self._lock:
+            return {
+                "tx_datagrams": self._udp_tx["datagrams"],
+                "tx_errors": self._udp_tx["errors"],
+                "tx_oversize": self._udp_tx["oversize"],
+                "tx_blocked": self._udp_tx["blocked"],
+                "rx_unknown": self._udp_rx["unknown"],
+                "rx_decode_errors": self._udp_rx["decode"],
+                "rx_truncated": self._udp_rx["truncated"],
+            }
 
     # ------------------------------------------------------------ 停顿检测
     def poll_stalls(self, now, warn_s, key_filter=None):
@@ -254,6 +289,7 @@ class LinkStats:
                     else round((now - row["last_rx"]) * 1e3, 1),
                     "gap_max_ms": round(row["gap_max"] * 1e3, 1), "gt": _gt_field(row),
                     "stalls": row["stalls"],
+                    "incomplete": row.get("incomplete", 0),
                 })
         return {"local": local_rows, "remote": remote_rows, "sources": sources}
 

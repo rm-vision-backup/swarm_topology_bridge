@@ -55,7 +55,9 @@ def _import_bridge_health():
  ConnectionMonitor, read_loadavg, read_self_cpu_seconds) = _import_bridge_health()
 
 # 跨话题合包纯逻辑（同目录，随 bridge_health 一起 install；见 bundle.py 模块头）
-from bundle import BundleBuilder, TopicBuffer, decode_frames, BundleError  # noqa: E402
+from bundle import BundleBuilder, TopicBuffer, decode_frames, decode_frame, BundleError  # noqa: E402
+# bundle 的 UDP 单播传输（optional；transport=tcp 时不使用）
+from udp_bundle import UdpBundleSocket, BundleReassembler, build_udp_peer_maps  # noqa: E402
 
 DEFAULT_HEALTH_KEY_TOPICS = (
     "swarm_pose",
@@ -106,6 +108,19 @@ class BridgeNode:
         self.bundle_max_bytes = int(_p('~bundle_max_bytes', 1400, int))
         self.bundle_queue_max = int(_p('~bundle_queue_max', 100, int))
         self.bundle_port = int(_p('~bundle_port', self.base_port, int))
+        self.bundle_transport = str(_p('~bundle_transport', 'tcp', str)).strip().lower()
+        if self.bundle_transport not in ('tcp', 'udp'):
+            rospy.logwarn("bridge: unknown ~bundle_transport=%r, fallback to tcp",
+                          self.bundle_transport)
+            self.bundle_transport = 'tcp'
+        if self.packing != 'bundle' and self.bundle_transport == 'udp':
+            rospy.logwarn("bridge: ~bundle_transport=udp 仅在 packing=bundle 时生效，legacy 忽略")
+        # UDP 的整源静默是可靠的停顿判据；TCP 维持原行为（只按话题判停顿）。
+        self.stall_bundle_sources = (self.packing == 'bundle' and self.bundle_transport == 'udp')
+        self.udp = None
+        self.udp_dsts = []
+        self.udp_addr_to_src = {}
+        self._udp_reassemblers = {}
 
         override_name = rospy.get_param('~uav_name', None)
         self.my_name = override_name if override_name else socket.gethostname()
@@ -162,10 +177,6 @@ class BridgeNode:
         # 4) 初始化 ZMQ PUB（legacy: 每话题一条；bundle: 每节点一条合包流）
         my_offset = self.uav_port_offsets.get(self.my_name, 0)
         if self.packing == 'bundle':
-            s = self.context.socket(zmq.PUB)
-            self._link_options_applied = self._apply_link_options(s)
-            s.bind("tcp://*:%d" % (self.bundle_port + my_offset))
-            self.bundle_pub = s
             self.bundle_lock = Lock()
             self.buffers = {}
             for i in range(len(self.topics)):
@@ -174,6 +185,24 @@ class BridgeNode:
             self.builder = BundleBuilder(self.bundle_max_bytes)
             self._tick_index = 0
             self._flush_drop_seen = {i: 0 for i in range(len(self.topics))}
+            if self.bundle_transport == 'udp':
+                recv_sources = list(self.topology.get(self.my_name, []))
+                local_addr, addr_to_src, dsts = build_udp_peer_maps(
+                    self.my_name, self.uav_ip, self.uav_port_offsets,
+                    self.topology, recv_sources, self.bundle_port)
+                self.udp = UdpBundleSocket(local_addr)
+                self.udp_addr_to_src = addr_to_src
+                self.udp_dsts = dsts
+                self.bundle_pub = None
+                rospy.loginfo(
+                    "bridge: UDP bundle bind=%s:%d peers=%d rcvbuf=%d sndbuf=%d",
+                    local_addr[0], local_addr[1], len(dsts),
+                    self.udp.effective_rcvbuf, self.udp.effective_sndbuf)
+            else:
+                s = self.context.socket(zmq.PUB)
+                self._link_options_applied = self._apply_link_options(s)
+                s.bind("tcp://*:%d" % (self.bundle_port + my_offset))
+                self.bundle_pub = s
         else:
             for i, _ in enumerate(self.topics):
                 s = self.context.socket(zmq.PUB)
@@ -181,15 +210,24 @@ class BridgeNode:
                 s.bind("tcp://*:%d" % (self.topic_ports[i] + my_offset))
                 self.pub_sockets[i] = s
                 self.pub_locks[i] = Lock()
-        rospy.loginfo("bridge: my_name=%s, port_offset=%d, packing=%s, topics=%d, health=%s",
-                      self.my_name, my_offset, self.packing, len(self.topics),
-                      self.health.path or "(disabled)")
+        rospy.loginfo("bridge: my_name=%s, port_offset=%d, packing=%s, transport=%s, topics=%d, health=%s",
+                      self.my_name, my_offset, self.packing,
+                      self.bundle_transport if self.packing == 'bundle' else "-",
+                      len(self.topics), self.health.path or "(disabled)")
 
         # 5) 初始化 ZMQ SUB 与对应 ROS Publisher（legacy: 每(源×话题)；bundle: 每源一条）
         src_list = self.topology.get(self.my_name, [])
         rospy.loginfo("bridge: recv sources=%s", ",".join(src_list) if src_list else "(none)")
         if self.packing == 'bundle':
             for src in src_list:
+                for i in range(len(self.topics)):
+                    pub_full = "/%s%s" % (src, ensure_global(self.topics[i]['name']))
+                    self.publishers[(src, i)] = rospy.Publisher(pub_full, self.msg_classes[i],
+                                                                queue_size=10)
+                if self.bundle_transport == 'udp':
+                    # UDP 没有 per-source socket；一个接收 socket 按 (ip, port) demux。
+                    self._udp_reassemblers[src] = BundleReassembler()
+                    continue
                 ip = self.uav_ip[src]
                 src_offset = self.uav_port_offsets.get(src, 0)
                 s = self.context.socket(zmq.SUB)
@@ -206,10 +244,6 @@ class BridgeNode:
                 self.sub_sockets.append(s)
                 self.poller.register(s, zmq.POLLIN)
                 self.socket_map[s] = src
-                for i in range(len(self.topics)):
-                    pub_full = "/%s%s" % (src, ensure_global(self.topics[i]['name']))
-                    self.publishers[(src, i)] = rospy.Publisher(pub_full, self.msg_classes[i],
-                                                                queue_size=10)
         else:
             for src in src_list:
                 ip = self.uav_ip[src]
@@ -265,6 +299,14 @@ class BridgeNode:
             "bundle_tick_hz": self.bundle_tick_hz if self.packing == 'bundle' else None,
             "bundle_port": self.bundle_port if self.packing == 'bundle' else None,
             "bundle_max_bytes": self.bundle_max_bytes if self.packing == 'bundle' else None,
+            "transport": self.bundle_transport if self.packing == 'bundle' else None,
+            "udp_local_addr": (list(self.udp.bound_addr)
+                               if self.udp is not None else None),
+            "udp_dst_count": (len(self.udp_dsts)
+                              if self.udp is not None else None),
+            "udp_peers": ([peer for peer, _addr in self.udp_dsts]
+                          if self.udp is not None else None),
+            "stall_bundle_sources": self.stall_bundle_sources,
             "topic_modes": ({self.topic_names.get(i, i): self.topic_modes[i]
                              for i in range(len(self.topics))}
                             if self.packing == 'bundle' else None),
@@ -391,6 +433,11 @@ class BridgeNode:
                                    "endpoint": endpoint, "value": value})
 
     def _shutdown_health(self):
+        if self.udp is not None:
+            try:
+                self.udp.close()
+            except Exception:                          # noqa: BLE001 - 退出路径不抛
+                pass
         for monitor in self._monitors:
             monitor.close()
         self.health.close()
@@ -399,20 +446,27 @@ class BridgeNode:
         record.setdefault("uav", self.my_name)
         self.health.emit(record)
 
-    def _record_error(self, sock, stage, exc):
-        """接收线程内的异常：写事件 + 节流 rosout，**不再让线程退出**。"""
-        mapped = self.socket_map.get(sock, ("?", -1))
-        if isinstance(mapped, tuple):                  # legacy: (src, topic_idx)
-            src, idx = mapped
-        else:                                          # bundle: socket_map[s] = src (str)
-            src, idx = mapped, -1
+    def _record_error(self, sock, stage, exc, src=None, idx=None):
+        """接收线程内的异常：写事件 + 节流 rosout，**不再让线程退出**。
+
+        UDP 没有 per-source socket，调用方显式传 src/idx；ZMQ 路径仍按 socket_map 解析。
+        """
+        if src is None:
+            mapped = self.socket_map.get(sock, ("?", -1))
+            if isinstance(mapped, tuple):              # legacy: (src, topic_idx)
+                src, idx = mapped
+            else:                                      # bundle: socket_map[s] = src (str)
+                src, idx = mapped, -1
+        elif idx is None:
+            idx = -1
+        topic = self.topic_names.get(idx, "(bundle)" if idx < 0 else str(idx))
         record = {"event": "error", "stage": stage, "src": src,
-                  "topic": self.topic_names.get(idx, str(idx)),
+                  "topic": topic,
                   "error": "%s: %s" % (type(exc).__name__, exc),
                   "traceback": traceback.format_exc()[-2000:]}
         self._record_bridge_event(record)
         rospy.logerr_throttle(5.0, "bridge: %s failed on %s/%s: %s",
-                              stage, src, self.topic_names.get(idx, idx), exc)
+                              stage, src, topic, exc)
 
     def _stuck_sockets(self):
         """已停用：不再跨线程查询 socket 事件。
@@ -426,6 +480,12 @@ class BridgeNode:
         """
         return []
 
+    def _stall_key_filter(self, scope, src, idx):
+        """bundle 整源停顿只在 UDP 下启用；TCP 保持原来只按话题判停顿。"""
+        if scope == "bundle":
+            return self.stall_bundle_sources
+        return idx in self.stall_indices
+
     def _health_loop(self):
         period = 1.0 / self.health_sample_hz
         last_matrix = 0.0
@@ -436,9 +496,10 @@ class BridgeNode:
                 now = time.monotonic()
                 stalled = False
                 for event in self.stats.poll_stalls(
-                        now, self.stall_warn_s,
-                        key_filter=lambda scope, src, idx: idx in self.stall_indices):
-                    event["topic"] = self.topic_names.get(event.pop("topic_idx"), "")
+                        now, self.stall_warn_s, key_filter=self._stall_key_filter):
+                    idx = event.pop("topic_idx", None)
+                    event["topic"] = ("(bundle)" if event.get("scope") == "bundle"
+                                      else self.topic_names.get(idx, ""))
                     self._record_bridge_event(event)
                     stalled = True
                 if stalled and not matrix_on_small_period:
@@ -456,6 +517,8 @@ class BridgeNode:
                         unconnected = len(self._link_seen - self._link_connected)
                         retries = sum(self._link_suppressed.values())
                     sample.update({"event": "sample", "uav": self.my_name,
+                                   "transport": (self.bundle_transport
+                                                 if self.packing == 'bundle' else None),
                                    "load1": read_loadavg(),
                                    "cpu_s": read_self_cpu_seconds(),
                                    "write_errors": self.health.errors,
@@ -463,7 +526,9 @@ class BridgeNode:
                                    "recv_loop_lag_s": (None if not self._recv_loop_tick
                                                        else round(now - self._recv_loop_tick, 3)),
                                    "links_seen": seen, "links_unconnected": unconnected,
-                                   "link_retries_suppressed": retries})
+                                   "link_retries_suppressed": retries,
+                                   "udp": (self.stats.udp_summary()
+                                           if self.udp is not None else None)})
                     self.health.emit(sample)
                     if self.health_matrix_period_s > 0.0 and \
                             now - last_matrix >= self.health_matrix_period_s:
@@ -534,8 +599,14 @@ class BridgeNode:
                         self._flush_drop_seen[i] = drop
                 if entries:
                     frames = self.builder.build(self._tick_index, entries)
+                    udp_counts = None
                     with self.bundle_lock:
-                        self.bundle_pub.send_multipart(frames, flags=0)
+                        if self.udp is not None:
+                            udp_counts = self.udp.send_frames(frames, self.udp_dsts)
+                        else:
+                            self.bundle_pub.send_multipart(frames, flags=0)
+                    if udp_counts is not None:
+                        self.stats.note_udp_tx(**udp_counts)
                     for i, _ in entries:
                         self.stats.note_tx(i)
                     self.stats.note_bundle_tx(len(frames), len(entries),
@@ -551,6 +622,61 @@ class BridgeNode:
                 next_t = time.monotonic() + period          # 落后：不追爆，重新对齐
 
     def recv_loop(self):
+        if self.packing == 'bundle' and self.udp is not None:
+            return self._recv_loop_udp()
+        return self._recv_loop_zmq()
+
+    def _handle_entries(self, src, entries, sock=None):
+        """反序列化并发布一组已解码的 bundle entries（TCP/UDP 共用）。"""
+        for idx, payload in entries:
+            try:
+                msg = self.msg_classes[idx]()
+                msg.deserialize(payload)
+            except Exception as exc:                   # noqa: BLE001
+                self._record_error(sock, "deserialize", exc, src=src, idx=idx)
+                continue
+            self.stats.note_rx(src, idx)
+            try:
+                self.publishers[(src, idx)].publish(msg)
+            except Exception as exc:                   # noqa: BLE001
+                self._record_error(sock, "publish", exc, src=src, idx=idx)
+
+    def _recv_loop_udp(self):
+        while not rospy.is_shutdown():
+            self._recv_loop_tick = time.monotonic()
+            try:
+                batch = self.udp.recv_batch(max_batch=64, timeout=0.1)
+            except Exception as exc:                   # noqa: BLE001 - 收包线程绝不退出
+                if not rospy.is_shutdown():
+                    self._record_error(None, "recv", exc, src="?", idx=-1)
+                time.sleep(0.05)
+                continue
+            for data, addr, truncated in batch:
+                src = self.udp_addr_to_src.get(addr)
+                if src is None:
+                    self.stats.note_udp_rx_anomaly("unknown")
+                    continue
+                if truncated:
+                    self.stats.note_udp_rx_anomaly("truncated")
+                    continue
+                try:
+                    seq, more, entries = decode_frame(data)
+                except BundleError as exc:
+                    self.stats.note_udp_rx_anomaly("decode")
+                    self._record_error(None, "bundle_decode", exc, src=src, idx=-1)
+                    continue
+                self.stats.note_bundle_rx(src, 1, len(entries), len(data))
+                reassembler = self._udp_reassemblers.get(src)
+                if reassembler is None:
+                    self.stats.note_udp_rx_anomaly("unknown")
+                    continue
+                completed, discarded = reassembler.feed(seq, more, entries, len(data))
+                if discarded:
+                    self.stats.note_udp_incomplete(src, discarded)
+                if completed is not None:
+                    self._handle_entries(src, completed, sock=None)
+
+    def _recv_loop_zmq(self):
         while not rospy.is_shutdown():
             # 自证存活：观测线程读这个标量判断收包线程有没有被饿死（不碰 socket）。
             self._recv_loop_tick = time.monotonic()
@@ -580,18 +706,7 @@ class BridgeNode:
                         continue
                     self.stats.note_bundle_rx(src, len(frames), len(entries),
                                               sum(len(f) for f in frames))
-                    for idx, payload in entries:
-                        try:
-                            msg = self.msg_classes[idx]()
-                            msg.deserialize(payload)
-                        except Exception as exc:           # noqa: BLE001
-                            self._record_error(s, "deserialize", exc)
-                            continue
-                        self.stats.note_rx(src, idx)
-                        try:
-                            self.publishers[(src, idx)].publish(msg)
-                        except Exception as exc:           # noqa: BLE001
-                            self._record_error(s, "publish", exc)
+                    self._handle_entries(src, entries, sock=s)
                     continue
                 try:
                     payload = s.recv(flags=0)

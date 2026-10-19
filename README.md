@@ -111,6 +111,7 @@ base_port: 4000
 
 ```yaml
 packing: bundle          # bundle | legacy（legacy = 旧的逐话题逐帧路径，一键回滚）
+bundle_transport: tcp    # tcp | udp（udp = 原始 UDP 单播，去 TCP ACK/重传；全队必须一致）
 bundle_port: 4200        # 每节点 bundle 绑定端口；实际 = bundle_port + uavs[].port_offset（用法同 base_port）
 bundle_tick_hz: 10.0     # 合包周期（Hz）；某话题实际发送率 = min(max_freq, bundle_tick_hz)
 bundle_max_bytes: 1400   # 单帧上限；超出按 entry 边界切帧（单条超大消息独占一帧）
@@ -122,6 +123,11 @@ topics:
 - 每话题可加 `mode`：`latest`=每 tick 只发最新值（周期话题，可丢中间值）；`queue`=窗口内全量保留（事件/安全类）。
   未写时默认：`max_freq` 为 0/null → `queue`，否则 `latest`。
 - **Service 不受影响**：仍是 DEALER/ROUTER 逐请求、即时，不参与合包。
+- **UDP 传输（`bundle_transport: udp`）**：每个 frame 作为一条 UDP datagram 发给每个对端，去掉 TCP ACK/重传；源身份按 `(ip, port)` 区分（实机用 IP，仿真用 port_offset）。UDP 无连接状态，**不产生 ZMQ `link` 事件**，链路活性看 `sources` 的 age/gap/stalls；整源静默会触发 `scope="bundle"` 的 `stall_start/end`。Service 仍为 TCP。
+  - 端口：UDP `bundle_port + offset` 需放行；Service 仍为 TCP `service_base_port + offset`。
+  - **全队必须同 `bundle_transport`**（TCP/UDP 不能混跑）；`health_start.transport` 用于核对。
+  - 回滚：config 改回 `bundle_transport: tcp`（或 launch 传 `bundle_transport:=tcp`），无需回退二进制。
+  - 已知限制：v1 线格式没有 frame index/count；多帧 tick 丢失中间帧、末帧到达时可能发布部分 entries，计数为 `sources[].incomplete`。
 - 端口：`bundle` 每节点只 bind 一个 `bundle_port+offset`（实机仍 4200，原 4200–4210 只剩 4200，防火墙可收紧）；只有 `legacy` 才用 `base_port+i`。
 - **线不兼容**：`bundle` 与 `legacy` 不能混跑（同端口会撞）；接收端以帧头 magic 校验，失配记 `proto_mismatch`。**全队必须同 `packing`**。
 - 回滚：config 改 `packing: legacy`，或 launch 传 `packing:=legacy`（代码原样保留，无需回退二进制）。

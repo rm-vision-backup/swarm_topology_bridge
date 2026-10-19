@@ -7,11 +7,13 @@
   <arg name="config" default="$(find swarm_topology_bridge)/config/topology_group_a_sim.yaml" />
   <!-- 合包开关：默认空 = 走 config YAML；传 packing:=legacy 可单点回滚对照 -->
   <arg name="packing" default="" />
+  <arg name="bundle_transport" default="" />
 
   <node pkg="swarm_topology_bridge" type="bridge_node.py" name="swarm_bridge" output="screen">
     <rosparam file="$(arg config)" command="load" />
     <param name="uav_name" value="$(arg uav_name)" />
     <!-- 仅当显式传 packing:=... 时才覆盖 YAML（unless 避免空串冲掉 YAML 的 packing） -->
     <param name="packing" value="$(arg packing)" unless="$(eval arg('packing') == '')" />
+    <param name="bundle_transport" value="$(arg bundle_transport)" unless="$(eval arg('bundle_transport') == '')" />
   </node>
 </launch>
