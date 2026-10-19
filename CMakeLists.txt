@@ -27,6 +27,7 @@ endif()
 
 install(PROGRAMS
   scripts/bridge_node.py
+  scripts/fleet_monitor.py
   scripts/test_chatter.py
   scripts/test_service_node.py
   DESTINATION ${CATKIN_PACKAGE_BIN_DESTINATION}

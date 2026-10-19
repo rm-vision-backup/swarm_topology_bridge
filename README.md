@@ -36,6 +36,7 @@
     ├── package.xml
     └── scripts
         ├── bridge_node.py            # 核心桥接节点（Topic 桥 + Service 代理）
+        ├── fleet_monitor.py          # GCS 机队状态终端监视（电压/模式/GPS fix）
         ├── test_chatter.py           # 连通性测试脚本
         ├── test_swarm_chatter.py     # 多机连通性测试脚本（Topic 回环）
         └── test_service_node.py      # 通用 Service 代理测试脚本
@@ -274,6 +275,19 @@ roslaunch swarm_topology_bridge test.launch uav_name:=UAV6
 - 实机各节点 `port_offset` 全部为 0（同端口、不同物理 IP）；
 - 上层业务节点在各自 ROS Master 上直接调用 `/test_srv/UAVn`（或业务 Service 名），bridge 自动完成跨 Master 转发；
 - 业务 Topic 与 Service 的判读方式与第 2、3 节相同（`[TopicBridge]`/`[ServiceProxy]` 日志、`rostopic`/`rosservice` 辅助确认）。
+
+### 4.1 GCS 机队状态监视
+
+实机配置 `config/topology.yaml` 以 1 Hz 广播 `mavros/state`、`mavros/battery`、
+`mavros/gpsstatus/gps1/raw`。在 GCS 上实时查看 UAV1–UAV16 的电压、飞行模式与
+GPS fix type：
+
+```bash
+rosrun swarm_topology_bridge fleet_monitor.py
+```
+
+每字段超过 3 s 未更新显示 `--`。参数：`~uav_count`（默认 16）、
+`~uav_prefix`（默认 `UAV`）、`~refresh_hz`（默认 1.0）、`~stale_s`（默认 3.0）。
 
 ## 5. 数据面观测与链路加固（2026-10-08 增）
 
