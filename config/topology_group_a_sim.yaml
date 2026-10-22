@@ -138,5 +138,8 @@ services:
   - {name: /UAV15/uav_task, type: swarm_uav_interfaces/UavTask, target: UAV15}
   - {name: /UAV15/uav_task_control, type: swarm_uav_interfaces/UavTaskControl, target: UAV15}
   - {name: /UAV15/uav_hold, type: swarm_uav_interfaces/UavHold, target: UAV15}
+  - {name: /UAV16/uav_task, type: swarm_uav_interfaces/UavTask, target: UAV16}
+  - {name: /UAV16/uav_task_control, type: swarm_uav_interfaces/UavTaskControl, target: UAV16}
+  - {name: /UAV16/uav_hold, type: swarm_uav_interfaces/UavHold, target: UAV16}
 
 service_base_port: 14000
